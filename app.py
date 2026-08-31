@@ -30,9 +30,12 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for, session
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 単勝＋複勝 1頭勝負 v2"
+APP_TITLE = "地方競馬 単勝＋複勝 1頭勝負 v2.3 300円固定版"
+WIN_BET = 100
+PLACE_BET = 200
+FIXED_BET = WIN_BET + PLACE_BET
 DAILY_LIMIT = 3000
-DEFAULT_BET = 300
+DEFAULT_BET = FIXED_BET
 NAR_BASE_URL = "https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo"
 SPAT4_URL = "https://www.spat4.jp/keiba/pc"
 
@@ -107,7 +110,12 @@ def to_float(v, default=0.0):
 def get_draft():
     with db() as con:
         r = con.execute("SELECT * FROM draft WHERE id=1").fetchone()
-    return dict(r) if r else {}
+    if not r:
+        return {}
+    d = dict(r)
+    # 旧版で700円/1000円等が保存されていても、v2.3では金額を強制統一する。
+    d["amount"] = FIXED_BET if d.get("grade") in ("S", "A") else 0
+    return d
 
 
 def save_draft(item, course, race, grade, score, amount):
@@ -254,10 +262,10 @@ def evaluate(horses, remaining):
 
 
 def recommended_amount(grade, remaining, low):
-    # S/Aのみ：単勝100円＋複勝200円＝合計300円
-    if grade not in ("S","A") or low<1.5 or remaining<300:
+    # v2.3: 金額計算はここだけ。S/A=300円、B/見送り=0円に完全固定。
+    if grade not in ("S", "A") or remaining < FIXED_BET:
         return 0
-    return 300
+    return FIXED_BET
 
 
 def save_pick(course,race,result):
@@ -279,7 +287,7 @@ CSS="""
 
 def page(body,title=APP_TITLE):
     member=(f'<div class="member-status">会員ログイン中：{html.escape(str(session.get("member_id","")))}　<a href="/logout">ログアウト</a></div>' if LOGIN_ENABLED and session.get("member_authenticated") else ('<div class="member-status setup">販売前：会員ログイン未設定</div>' if not LOGIN_ENABLED else ''))
-    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="地方競馬1頭勝負"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="head"><h1>{APP_TITLE}</h1><span class="badge">単勝＋複勝</span></div><div class="nav"><a class="btn secondary" href="/">ホーム</a><a class="btn secondary" href="/analyze">1頭勝負予想</a><a class="btn secondary" href="/picks">今日の本命</a><a class="btn secondary" href="/history">成績履歴</a><a class="btn secondary" href="/analytics">成績分析</a><a class="btn secondary" href="/courses">本日の開催</a></div>{member}{body}<div class="note">このv2は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
+    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="地方競馬1頭勝負"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="head"><h1>{APP_TITLE}</h1><span class="badge">単勝＋複勝</span></div><div class="nav"><a class="btn secondary" href="/">ホーム</a><a class="btn secondary" href="/analyze">1頭勝負予想</a><a class="btn secondary" href="/picks">今日の本命</a><a class="btn secondary" href="/history">成績履歴</a><a class="btn secondary" href="/analytics">成績分析</a><a class="btn secondary" href="/courses">本日の開催</a></div>{member}{body}<div class="note">v2.3 300円固定版｜このシステムは市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
 
 
 def login_page(message=""):
@@ -346,6 +354,7 @@ def record():
     d=get_draft()
     if not d: return redirect(url_for("home",msg="先に本命1頭を分析してください。"))
     amount=int(d.get("amount") or 0)
+    amount = FIXED_BET if d.get("grade") in ("S", "A") else 0
     if amount<100: return redirect(url_for("home",msg="見送り判定のため推奨購入額は0円です。"))
     if amount>summary()["remaining"]: return redirect(url_for("home",msg="本日の残り予算を超えています。"))
     with db() as con:
