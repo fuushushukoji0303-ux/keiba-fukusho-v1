@@ -30,7 +30,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for, session
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 単勝＋複勝 1頭勝負 v2.7 300円固定＋今日リセット版"
+APP_TITLE = "地方競馬 単勝＋複勝 1頭勝負 v2.8 300円固定＋スマホ検証版"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 NAR_BASE_URL = "https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo"
@@ -90,6 +90,17 @@ def init_db():
             place_low REAL NOT NULL, place_high REAL NOT NULL,
             grade TEXT NOT NULL, score INTEGER NOT NULL, ev_index REAL NOT NULL,
             UNIQUE(race_date, course, race)
+        );
+        CREATE TABLE IF NOT EXISTS verifications(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            pick_id INTEGER NOT NULL UNIQUE,
+            verified_at TEXT NOT NULL,
+            finish_pos INTEGER NOT NULL,
+            win_payout INTEGER NOT NULL DEFAULT 0,
+            place_payout INTEGER NOT NULL DEFAULT 0,
+            bet_amount INTEGER NOT NULL DEFAULT 0,
+            return_amount INTEGER NOT NULL DEFAULT 0,
+            profit INTEGER NOT NULL DEFAULT 0
         );
         """)
 init_db()
@@ -304,14 +315,14 @@ def save_pick(course,race,result):
 
 CSS="""
 :root{--bg:#f3f6fa;--card:#fff;--ink:#17202d;--muted:#68778c;--line:#dce4ee;--blue:#1677ff;--green:#16834f;--red:#b42318;--gold:#a56500}
-*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Yu Gothic",sans-serif}.wrap{max-width:980px;margin:auto;padding:12px}.head{display:flex;justify-content:space-between;gap:8px;align-items:center;margin:4px 0 12px}h1{font-size:22px;margin:0}.badge{background:#e8f7ee;color:#17723c;border-radius:99px;padding:6px 9px;font-weight:800;font-size:12px}.nav{display:flex;gap:7px;overflow:auto;margin-bottom:10px}.card{background:#fff;border:1px solid var(--line);border-radius:15px;padding:14px;margin-bottom:10px;box-shadow:0 2px 8px #17202d0b}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.metric small{color:var(--muted);display:block}.metric strong{font-size:21px}.title{font-weight:900;font-size:18px;margin-bottom:10px}.two{display:grid;grid-template-columns:1fr 1fr;gap:8px}label{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}input,select{width:100%;font-size:16px;padding:11px;border:1px solid #cbd6e2;border-radius:10px;background:#fff}button,.btn{border:0;border-radius:10px;background:var(--blue);color:#fff;padding:11px 13px;font-weight:800;text-decoration:none;display:inline-block;font-size:14px}.secondary{background:#edf2f7;color:#26384d}.green{background:var(--green)}.red{background:var(--red)}.gold{background:var(--gold)}.actions{display:flex;gap:7px;flex-wrap:wrap}.note,.ok,.bad{padding:11px;border-radius:11px;margin-bottom:10px;font-size:13px;line-height:1.6}.note{background:#fff7e5;border:1px solid #efd196;color:#704600}.ok{background:#eaf8ef;border:1px solid #a9d9b9;color:#155d31}.bad{background:#fff0ef;border:1px solid #efbbb5;color:#7d2118}.grade{font-size:42px;font-weight:950}.score{font-size:18px;font-weight:800;color:var(--muted)}table{width:100%;border-collapse:collapse}th,td{padding:10px 8px;border-bottom:1px solid #e5ebf1;text-align:left}.scroll{overflow:auto}.horse-card{border:1px solid #d7e2ee;border-radius:18px;padding:14px;margin-bottom:12px}.horse-no{font-size:30px;font-weight:950}.horse-name{font-size:20px;font-weight:900}.pick-grid,.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}.pick-grid>div,.stats-grid>div{background:#f5f8fb;border-radius:12px;padding:10px}.pick-grid span,.stats-grid span{display:block;color:var(--muted);font-size:12px}.pick-grid strong,.stats-grid strong{display:block;font-size:18px}.member-status{margin:8px 0 12px;padding:8px 12px;border-radius:10px;background:#eef6ff;color:#375a7f;font-size:13px}.member-status.setup{background:#fff8e8;color:#775112}.small{font-size:12px;color:var(--muted)}
-@media(max-width:760px){.wrap{padding:10px}.head h1{font-size:27px}.nav{display:grid;grid-template-columns:1fr 1fr}.nav .btn{text-align:center;min-height:52px;display:flex;align-items:center;justify-content:center}.grid,.pick-grid,.stats-grid{grid-template-columns:1fr 1fr}.two{grid-template-columns:1fr}.metric strong{font-size:18px}.desktop{display:none}.horse-no{font-size:28px}}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","Yu Gothic",sans-serif}.wrap{max-width:980px;margin:auto;padding:12px}.head{display:flex;justify-content:space-between;gap:8px;align-items:center;margin:4px 0 12px}h1{font-size:22px;margin:0}.badge{background:#e8f7ee;color:#17723c;border-radius:99px;padding:6px 9px;font-weight:800;font-size:12px}.nav{display:flex;gap:7px;overflow:auto;margin-bottom:10px}.card{background:#fff;border:1px solid var(--line);border-radius:15px;padding:14px;margin-bottom:10px;box-shadow:0 2px 8px #17202d0b}.grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px}.metric small{color:var(--muted);display:block}.metric strong{font-size:21px}.title{font-weight:900;font-size:18px;margin-bottom:10px}.two{display:grid;grid-template-columns:1fr 1fr;gap:8px}label{display:block;color:var(--muted);font-size:12px;margin-bottom:4px}input,select{width:100%;font-size:16px;padding:11px;border:1px solid #cbd6e2;border-radius:10px;background:#fff}button,.btn{border:0;border-radius:10px;background:var(--blue);color:#fff;padding:11px 13px;font-weight:800;text-decoration:none;display:inline-block;font-size:14px}.secondary{background:#edf2f7;color:#26384d}.green{background:var(--green)}.red{background:var(--red)}.gold{background:var(--gold)}.actions{display:flex;gap:7px;flex-wrap:wrap}.note,.ok,.bad{padding:11px;border-radius:11px;margin-bottom:10px;font-size:13px;line-height:1.6}.note{background:#fff7e5;border:1px solid #efd196;color:#704600}.ok{background:#eaf8ef;border:1px solid #a9d9b9;color:#155d31}.bad{background:#fff0ef;border:1px solid #efbbb5;color:#7d2118}.grade{font-size:42px;font-weight:950}.score{font-size:18px;font-weight:800;color:var(--muted)}table{width:100%;border-collapse:collapse}th,td{padding:10px 8px;border-bottom:1px solid #e5ebf1;text-align:left}.scroll{overflow:auto}.horse-card{border:1px solid #d7e2ee;border-radius:18px;padding:14px;margin-bottom:12px}.horse-no{font-size:30px;font-weight:950}.horse-name{font-size:20px;font-weight:900}.pick-grid,.stats-grid{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;margin-top:10px}.pick-grid>div,.stats-grid>div{background:#f5f8fb;border-radius:12px;padding:10px}.pick-grid span,.stats-grid span{display:block;color:var(--muted);font-size:12px}.pick-grid strong,.stats-grid strong{display:block;font-size:18px}.member-status{margin:8px 0 12px;padding:8px 12px;border-radius:10px;background:#eef6ff;color:#375a7f;font-size:13px}.member-status.setup{background:#fff8e8;color:#775112}.small{font-size:12px;color:var(--muted)}.verify-form{display:grid;grid-template-columns:repeat(4,1fr);gap:8px;align-items:end}.verify-form button{min-height:44px}.verify-summary{display:grid;grid-template-columns:repeat(5,1fr);gap:8px}.verify-summary>div{background:#f5f8fb;border-radius:12px;padding:10px}.verify-summary span{display:block;color:var(--muted);font-size:12px}.verify-summary strong{display:block;font-size:18px}
+@media(max-width:760px){.wrap{padding:10px}.verify-form{grid-template-columns:1fr 1fr}.verify-summary{grid-template-columns:1fr 1fr}.verify-form input,.verify-form select{min-height:48px}.verify-form button{grid-column:1/-1;min-height:52px;font-size:16px}.head h1{font-size:27px}.nav{display:grid;grid-template-columns:1fr 1fr}.nav .btn{text-align:center;min-height:52px;display:flex;align-items:center;justify-content:center}.grid,.pick-grid,.stats-grid{grid-template-columns:1fr 1fr}.two{grid-template-columns:1fr}.metric strong{font-size:18px}.desktop{display:none}.horse-no{font-size:28px}}
 """
 
 
 def page(body,title=APP_TITLE):
     member=(f'<div class="member-status">会員ログイン中：{html.escape(str(session.get("member_id","")))}　<a href="/logout">ログアウト</a></div>' if LOGIN_ENABLED and session.get("member_authenticated") else ('<div class="member-status setup">販売前：会員ログイン未設定</div>' if not LOGIN_ENABLED else ''))
-    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="地方競馬複勝"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="head"><h1>{APP_TITLE}</h1><span class="badge">v2.7・300円固定</span></div><div class="nav"><a class="btn secondary" href="/">ホーム</a><a class="btn secondary" href="/analyze">複勝1頭予想</a><a class="btn secondary" href="/picks">今日の候補</a><a class="btn secondary" href="/history">成績履歴</a><a class="btn secondary" href="/analytics">成績分析</a><a class="btn secondary" href="/courses">本日の開催</a></div>{member}{body}<div class="note">このv2.7は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
+    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="地方競馬複勝"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="head"><h1>{APP_TITLE}</h1><span class="badge">v2.8・スマホ検証</span></div><div class="nav"><a class="btn secondary" href="/">ホーム</a><a class="btn secondary" href="/analyze">複勝1頭予想</a><a class="btn secondary" href="/picks">今日の候補</a><a class="btn secondary" href="/history">成績履歴</a><a class="btn secondary" href="/analytics">成績分析</a><a class="btn secondary" href="/verify">スマホ検証</a><a class="btn secondary" href="/courses">本日の開催</a></div>{member}{body}<div class="note">このv2.8は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
 
 
 def login_page(message=""):
@@ -445,6 +456,69 @@ def analytics():
     for label,cond in bands:
         s=stat_box(cond); bandcards+=f'''<div class="horse-card"><div class="horse-name">{label}倍</div><div class="stats-grid"><div><span>レース</span><strong>{s['n']}</strong></div><div><span>的中率</span><strong>{s['hit_rate']:.1f}%</strong></div><div><span>回収率</span><strong>{s['roi']:.1f}%</strong></div><div><span>収支</span><strong>{s['profit']:+,}円</strong></div></div></div>'''
     return page(f'''<div class="card"><div class="title">通算</div><div class="stats-grid"><div><span>確定</span><strong>{overall['n']}</strong></div><div><span>的中率</span><strong>{overall['hit_rate']:.1f}%</strong></div><div><span>回収率</span><strong>{overall['roi']:.1f}%</strong></div><div><span>収支</span><strong>{overall['profit']:+,}円</strong></div></div></div><div class="card"><div class="title">競馬場別</div>{cards(courses,'course')}</div><div class="card"><div class="title">ランク別</div>{cards(grades,'grade')}</div><div class="card"><div class="title">複勝下限オッズ帯別</div>{bandcards}</div>''')
+
+def verification_summary():
+    with db() as con:
+        rows=con.execute("SELECT bet_amount,return_amount,profit FROM verifications ORDER BY id").fetchall()
+    n=len(rows)
+    bet=sum(int(r["bet_amount"]) for r in rows)
+    ret=sum(int(r["return_amount"]) for r in rows)
+    bought=sum(1 for r in rows if int(r["bet_amount"])>0)
+    hits=sum(1 for r in rows if int(r["bet_amount"])>0 and int(r["return_amount"])>0)
+    return {"n":n,"bought":bought,"hits":hits,"hit_rate":hits/bought*100 if bought else 0,"bet":bet,"ret":ret,"roi":ret/bet*100 if bet else 0,"profit":ret-bet}
+
+@app.route("/verify",methods=["GET","POST"])
+def verify():
+    msg=""
+    if request.method=="POST":
+        pick_id=to_int(request.form.get("pick_id"),0)
+        finish=max(1,to_int(request.form.get("finish_pos"),0))
+        win_payout=max(0,to_int(request.form.get("win_payout"),0))
+        place_payout=max(0,to_int(request.form.get("place_payout"),0))
+        with db() as con:
+            pick=con.execute("SELECT * FROM picks WHERE id=?",(pick_id,)).fetchone()
+        if not pick:
+            msg="検証対象の予想が見つかりません。"
+        else:
+            bet_amount=300 if pick["grade"] in ("S","A") else 0
+            if bet_amount==0:
+                ret=0
+            elif finish==1:
+                ret=win_payout + place_payout*2
+            elif finish in (2,3):
+                ret=place_payout*2
+            else:
+                ret=0
+            profit=ret-bet_amount
+            with db() as con:
+                con.execute("""INSERT INTO verifications(pick_id,verified_at,finish_pos,win_payout,place_payout,bet_amount,return_amount,profit)
+                VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(pick_id) DO UPDATE SET verified_at=excluded.verified_at,finish_pos=excluded.finish_pos,
+                win_payout=excluded.win_payout,place_payout=excluded.place_payout,bet_amount=excluded.bet_amount,return_amount=excluded.return_amount,profit=excluded.profit""",
+                (pick_id,now().strftime("%Y-%m-%d %H:%M:%S"),finish,win_payout,place_payout,bet_amount,ret,profit))
+            msg=f"検証を保存しました。仮想損益 {profit:+,}円"
+    s=verification_summary()
+    with db() as con:
+        rows=con.execute("""SELECT p.*,v.finish_pos,v.win_payout,v.place_payout,v.bet_amount,v.return_amount,v.profit
+            FROM picks p LEFT JOIN verifications v ON v.pick_id=p.id
+            ORDER BY p.race_date DESC,p.saved_at DESC LIMIT 80""").fetchall()
+    cards=""
+    for r in rows:
+        verified=r["finish_pos"] is not None
+        result_html=(f'<div class="ok">検証済み：{r["finish_pos"]}着　仮想購入 {int(r["bet_amount"] or 0):,}円　払戻 {int(r["return_amount"] or 0):,}円　損益 {int(r["profit"] or 0):+,}円</div>' if verified else '')
+        options=''.join(f'<option value="{n}" {"selected" if verified and int(r["finish_pos"])==n else ""}>{n}着</option>' for n in range(1,13))
+        cards+=f'''<div class="horse-card"><div class="horse-name">{html.escape(r['race_date'])} / {html.escape(r['course'])} {html.escape(r['race'])}</div>
+        <div class="horse-no">{r['horse_no']}番</div><div class="horse-name">{html.escape(r['horse_name'])}</div>
+        <div class="pick-grid"><div><span>判定</span><strong>{r['grade']}</strong></div><div><span>スコア</span><strong>{r['score']}</strong></div><div><span>複勝</span><strong>{r['place_low']:.1f}～{r['place_high']:.1f}</strong></div><div><span>参考EV</span><strong>{r['ev_index']:.2f}</strong></div></div>
+        <br>{result_html}<form method="post" class="verify-form"><input type="hidden" name="pick_id" value="{r['id']}">
+        <div><label>着順</label><select name="finish_pos">{options}</select></div>
+        <div><label>単勝払戻（100円）</label><input inputmode="numeric" type="number" min="0" step="10" name="win_payout" value="{int(r['win_payout'] or 0)}" placeholder="例 440"></div>
+        <div><label>複勝払戻（100円）</label><input inputmode="numeric" type="number" min="0" step="10" name="place_payout" value="{int(r['place_payout'] or 0)}" placeholder="例 180"></div>
+        <button class="green">このレースを検証保存</button></form></div>'''
+    message=f'<div class="ok">{html.escape(msg)}</div>' if msg else ''
+    guide='''<div class="note"><strong>スマホ検証の使い方</strong><br>① 予想時に「1頭を分析」すると自動で一覧に残ります。<br>② レース後、着順と公式の100円払戻を入力します。<br>③ S/Aは単勝100円＋複勝200円＝300円で仮想計算。B/見送りは購入0円として観察成績だけ残します。</div>'''
+    body=message+f'''<div class="card"><div class="title">スマホ検証ダッシュボード</div><div class="verify-summary">
+    <div><span>検証済み</span><strong>{s['n']}R</strong></div><div><span>購入対象</span><strong>{s['bought']}R</strong></div><div><span>的中率</span><strong>{s['hit_rate']:.1f}%</strong></div><div><span>回収率</span><strong>{s['roi']:.1f}%</strong></div><div><span>仮想収支</span><strong>{s['profit']:+,}円</strong></div></div></div>{guide}<div class="card"><div class="title">予想をスマホで検証</div>{cards or '<div class="note">まだ分析済みの予想がありません。先に1頭予想を実行してください。</div>'}</div>'''
+    return page(body,"スマホ検証")
 
 @app.get("/courses")
 def courses():
