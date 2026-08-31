@@ -30,7 +30,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for, session
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 単勝＋複勝 1頭勝負 v2.5 300円固定版"
+APP_TITLE = "地方競馬 単勝＋複勝 1頭勝負 v2.6 300円固定＋本日リセット版"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 NAR_BASE_URL = "https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo"
@@ -311,7 +311,7 @@ CSS="""
 
 def page(body,title=APP_TITLE):
     member=(f'<div class="member-status">会員ログイン中：{html.escape(str(session.get("member_id","")))}　<a href="/logout">ログアウト</a></div>' if LOGIN_ENABLED and session.get("member_authenticated") else ('<div class="member-status setup">販売前：会員ログイン未設定</div>' if not LOGIN_ENABLED else ''))
-    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="地方競馬複勝"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="head"><h1>{APP_TITLE}</h1><span class="badge">複勝版</span></div><div class="nav"><a class="btn secondary" href="/">ホーム</a><a class="btn secondary" href="/analyze">複勝1頭予想</a><a class="btn secondary" href="/picks">今日の候補</a><a class="btn secondary" href="/history">成績履歴</a><a class="btn secondary" href="/analytics">成績分析</a><a class="btn secondary" href="/courses">本日の開催</a></div>{member}{body}<div class="note">このv2.5は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
+    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="地方競馬複勝"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="head"><h1>{APP_TITLE}</h1><span class="badge">複勝版</span></div><div class="nav"><a class="btn secondary" href="/">ホーム</a><a class="btn secondary" href="/analyze">複勝1頭予想</a><a class="btn secondary" href="/picks">今日の候補</a><a class="btn secondary" href="/history">成績履歴</a><a class="btn secondary" href="/analytics">成績分析</a><a class="btn secondary" href="/courses">本日の開催</a></div>{member}{body}<div class="note">このv2.6は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
 
 
 def login_page(message=""):
@@ -343,7 +343,8 @@ def home():
     draft=''
     if d:
         draft=f'''<div class="card"><div class="title">現在の本命1頭</div><div class="horse-card"><div class="horse-no">{d.get('horse_no','')}番</div><div class="horse-name">{html.escape(str(d.get('horse_name','')))}</div><div class="pick-grid"><div><span>複勝オッズ</span><strong>{float(d.get('place_low') or 0):.1f}～{float(d.get('place_high') or 0):.1f}倍</strong></div><div><span>判定</span><strong>{html.escape(str(d.get('grade','')))}</strong></div><div><span>参考EV</span><strong>{float(d.get('ev_index') or 0):.2f}</strong></div><div><span>推奨購入額</span><strong>{int(d.get('amount') or 0):,}円</strong></div><div><span>買い方</span><strong>単勝100円＋複勝200円</strong></div></div></div><form method="post" action="/record"><button class="green">この1頭を購入記録へ</button></form></div>'''
-    return page(f'''{msg_html}<div class="grid"><div class="card metric"><small>本日の上限</small><strong>{DAILY_LIMIT:,}円</strong></div><div class="card metric"><small>使用額</small><strong>{s['bet']:,}円</strong></div><div class="card metric"><small>残り予算</small><strong>{s['remaining']:,}円</strong></div><div class="card metric"><small>本日の収支</small><strong>{s['profit']:+,}円</strong></div></div><div class="card"><div class="title">複勝1頭予想</div><div class="actions"><a class="btn green" href="/analyze">オッズ取得 → 1頭予想</a><a class="btn gold" href="/picks">今日の候補を見る</a></div></div>{draft}''')
+    reset_card = '''<div class="card"><div class="title">本日のテストデータ</div><div class="small">今日の購入履歴・今日の候補・ホームの本命だけを削除して、使用額0円・残り予算3,000円・本日の収支0円に戻します。過去日の成績は残ります。</div><br><form method="post" action="/reset-today" onsubmit="return confirm('本日のデータをリセットします。よろしいですか？');"><button class="red">本日の成績をリセット</button></form></div>'''
+    return page(f'''{msg_html}<div class="grid"><div class="card metric"><small>本日の上限</small><strong>{DAILY_LIMIT:,}円</strong></div><div class="card metric"><small>使用額</small><strong>{s['bet']:,}円</strong></div><div class="card metric"><small>残り予算</small><strong>{s['remaining']:,}円</strong></div><div class="card metric"><small>本日の収支</small><strong>{s['profit']:+,}円</strong></div></div><div class="card"><div class="title">複勝1頭予想</div><div class="actions"><a class="btn green" href="/analyze">オッズ取得 → 1頭予想</a><a class="btn gold" href="/picks">今日の候補を見る</a></div></div>{reset_card}{draft}''')
 
 @app.route("/analyze",methods=["GET","POST"])
 def analyze():
@@ -374,6 +375,15 @@ def apply():
     amount=fixed_amount(grade, summary()["remaining"], item["place_low"])
     save_draft(item,request.form.get("course",""),to_int(request.form.get("race")),grade,to_int(request.form.get("score")),amount)
     return redirect(url_for("home",msg="本命1頭をホームへ入力しました。"))
+
+@app.post("/reset-today")
+def reset_today():
+    with db() as con:
+        con.execute("DELETE FROM purchases WHERE race_date=?", (today(),))
+        con.execute("DELETE FROM picks WHERE race_date=?", (today(),))
+        con.execute("DELETE FROM draft WHERE id=1")
+    return redirect(url_for("home", msg="本日のデータをリセットしました。使用額0円・残り予算3,000円・本日の収支0円です。"))
+
 
 @app.post("/record")
 def record():
