@@ -1,10 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 複勝投票管理 v1
+地方競馬 単勝＋複勝 1頭勝負 v2.5 300円固定版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
-- 1レース1頭の本命1頭を提示
-- S / A / B / 見送り判定
+- 1レース1頭の本命を提示（単勝100円＋複勝200円）
+- S / A / B / 見送り判定（S/Aのみ購入候補）
 - 候補評価・参考EV・優先度・推奨購入額
 - 購入記録、的中/ハズレ、払戻、回収率、競馬場別/ランク別/オッズ帯別集計
 - スマホ/PCレスポンシブ
@@ -30,7 +30,7 @@ from pathlib import Path
 from flask import Flask, request, redirect, url_for, session
 
 JST = timezone(timedelta(hours=9))
-APP_TITLE = "地方競馬 単勝＋複勝 1頭勝負 v2.4 300円固定版"
+APP_TITLE = "地方競馬 単勝＋複勝 1頭勝負 v2.5 300円固定版"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 NAR_BASE_URL = "https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo"
@@ -104,20 +104,31 @@ def to_float(v, default=0.0):
     except Exception: return default
 
 
+def fixed_amount(grade, remaining, low):
+    """現行ルールの購入額を一元管理。S/Aのみ300円、B/見送りは0円。"""
+    if grade not in ("S", "A"):
+        return 0
+    if to_float(low, 0.0) < 1.5:
+        return 0
+    if to_int(remaining, 0) < 300:
+        return 0
+    return 300
+
+
 def get_draft():
     with db() as con:
         r = con.execute("SELECT * FROM draft WHERE id=1").fetchone()
     if not r:
         return {}
     d = dict(r)
-    # 旧版で保存された700円/1000円などが残っていても、表示・記録は現行ルールに正規化
-    d["amount"] = 300 if d.get("grade") in ("S", "A") and float(d.get("place_low") or 0) >= 1.5 else 0
+    # 旧版の700円/1000円等がDBに残っていても必ず現行ルールへ正規化
+    d["amount"] = fixed_amount(d.get("grade"), 300, d.get("place_low"))
     return d
 
 
 def save_draft(item, course, race, grade, score, amount):
-    # 購入額はクライアントから受け取った値を信用せず、現行ルールで固定
-    amount = 300 if grade in ("S", "A") and float(item.get("place_low") or 0) >= 1.5 else 0
+    # フォームから渡された金額は信用せず、ここで300円/0円へ強制
+    amount = fixed_amount(grade, 300, item.get("place_low"))
     with db() as con:
         con.execute("""
         INSERT INTO draft(id,saved_at,course,race,horse_no,horse_name,place_low,place_high,grade,score,ev_index,amount)
@@ -243,28 +254,42 @@ def score_horses(horses):
 
 def evaluate(horses, remaining):
     ranked=score_horses(horses)
-    if not ranked: return {"grade":"見送り","score":0,"recs":[],"reasons":["候補を取得できませんでした。"]}
+    if not ranked:
+        return {"grade":"見送り","score":0,"recs":[],"reasons":["候補を取得できませんでした。"]}
     best=ranked[0]
     score=int(round(best["priority_score"]))
-    # 初版: Sはかなり厳しく。データ検証後に閾値調整する前提。
-    # 1頭勝負版：S/Aだけ購入対象。Bは観察用。
-    # 複勝200円だけ的中した場合に300円を回収しやすいよう、複勝下限1.5倍を重視する。
-    if remaining<300: grade="見送り"
-    elif score>=88 and best["confidence"]>=84 and best["market_rank"]<=3 and best["place_low"]>=1.5 and best["spread"]<=0.35: grade="S"
-    elif score>=80 and best["confidence"]>=76 and best["market_rank"]<=4 and best["place_low"]>=1.5: grade="A"
-    elif score>=72 and best["confidence"]>=68 and best["market_rank"]<=5: grade="B"
-    else: grade="見送り"
+
+    # 1頭勝負：S/Aのみ購入対象。Bは観察用。
+    # 複勝200円が下限1.5倍なら、2～3着時でも300円回収の目安になる。
+    if remaining < 300:
+        grade="見送り"
+    elif score>=88 and best["confidence"]>=84 and best["market_rank"]<=3 and best["place_low"]>=1.5 and best["spread"]<=0.35:
+        grade="S"
+    elif score>=80 and best["confidence"]>=76 and best["market_rank"]<=4 and best["place_low"]>=1.5:
+        grade="A"
+    elif score>=72 and best["confidence"]>=68 and best["market_rank"]<=5:
+        grade="B"
+    else:
+        grade="見送り"
+
     place_only_low=int(200*best["place_low"])-300
     first_low=int(100*best["win_odds"]+200*best["place_low"])-300
-    reasons=[f"候補評価：{best['confidence']}点",f"優先度：{best['priority_score']:.1f}",f"単勝オッズ：{best['win_odds']:.1f}倍",f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",f"参考EV：{best['ev_index']:.2f}",f"単勝人気順位：{best['market_rank']}位",f"2～3着時の下限損益目安：{place_only_low:+,}円",f"1着時の下限損益目安：{first_low:+,}円"]
+    reasons=[
+        f"候補評価：{best['confidence']}点",
+        f"優先度：{best['priority_score']:.1f}",
+        f"単勝オッズ：{best['win_odds']:.1f}倍",
+        f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",
+        f"参考EV：{best['ev_index']:.2f}",
+        f"単勝人気順位：{best['market_rank']}位",
+        f"2～3着時の下限損益目安：{place_only_low:+,}円",
+        f"1着時の下限損益目安：{first_low:+,}円",
+    ]
+    # 画面へ返す候補も本命1頭だけに限定
     return {"grade":grade,"score":score,"recs":[best],"reasons":reasons}
 
 
 def recommended_amount(grade, remaining, low):
-    # S/Aのみ：単勝100円＋複勝200円＝合計300円
-    if grade not in ("S","A") or low<1.5 or remaining<300:
-        return 0
-    return 300
+    return fixed_amount(grade, remaining, low)
 
 
 def save_pick(course,race,result):
@@ -286,7 +311,7 @@ CSS="""
 
 def page(body,title=APP_TITLE):
     member=(f'<div class="member-status">会員ログイン中：{html.escape(str(session.get("member_id","")))}　<a href="/logout">ログアウト</a></div>' if LOGIN_ENABLED and session.get("member_authenticated") else ('<div class="member-status setup">販売前：会員ログイン未設定</div>' if not LOGIN_ENABLED else ''))
-    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="地方競馬1頭勝負"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="head"><h1>{APP_TITLE}</h1><span class="badge">単勝＋複勝</span></div><div class="nav"><a class="btn secondary" href="/">ホーム</a><a class="btn secondary" href="/analyze">1頭勝負予想</a><a class="btn secondary" href="/picks">今日の本命</a><a class="btn secondary" href="/history">成績履歴</a><a class="btn secondary" href="/analytics">成績分析</a><a class="btn secondary" href="/courses">本日の開催</a></div>{member}{body}<div class="note">このv2.4は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
+    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="地方競馬複勝"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="head"><h1>{APP_TITLE}</h1><span class="badge">複勝版</span></div><div class="nav"><a class="btn secondary" href="/">ホーム</a><a class="btn secondary" href="/analyze">複勝1頭予想</a><a class="btn secondary" href="/picks">今日の候補</a><a class="btn secondary" href="/history">成績履歴</a><a class="btn secondary" href="/analytics">成績分析</a><a class="btn secondary" href="/courses">本日の開催</a></div>{member}{body}<div class="note">このv2.5は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
 
 
 def login_page(message=""):
@@ -318,15 +343,15 @@ def home():
     draft=''
     if d:
         draft=f'''<div class="card"><div class="title">現在の本命1頭</div><div class="horse-card"><div class="horse-no">{d.get('horse_no','')}番</div><div class="horse-name">{html.escape(str(d.get('horse_name','')))}</div><div class="pick-grid"><div><span>複勝オッズ</span><strong>{float(d.get('place_low') or 0):.1f}～{float(d.get('place_high') or 0):.1f}倍</strong></div><div><span>判定</span><strong>{html.escape(str(d.get('grade','')))}</strong></div><div><span>参考EV</span><strong>{float(d.get('ev_index') or 0):.2f}</strong></div><div><span>推奨購入額</span><strong>{int(d.get('amount') or 0):,}円</strong></div><div><span>買い方</span><strong>単勝100円＋複勝200円</strong></div></div></div><form method="post" action="/record"><button class="green">この1頭を購入記録へ</button></form></div>'''
-    return page(f'''{msg_html}<div class="grid"><div class="card metric"><small>本日の上限</small><strong>{DAILY_LIMIT:,}円</strong></div><div class="card metric"><small>使用額</small><strong>{s['bet']:,}円</strong></div><div class="card metric"><small>残り予算</small><strong>{s['remaining']:,}円</strong></div><div class="card metric"><small>本日の収支</small><strong>{s['profit']:+,}円</strong></div></div><div class="card"><div class="title">単勝100円＋複勝200円・1頭勝負</div><div class="actions"><a class="btn green" href="/analyze">オッズ取得 → 本命1頭予想</a><a class="btn gold" href="/picks">今日の本命を見る</a></div></div>{draft}''')
+    return page(f'''{msg_html}<div class="grid"><div class="card metric"><small>本日の上限</small><strong>{DAILY_LIMIT:,}円</strong></div><div class="card metric"><small>使用額</small><strong>{s['bet']:,}円</strong></div><div class="card metric"><small>残り予算</small><strong>{s['remaining']:,}円</strong></div><div class="card metric"><small>本日の収支</small><strong>{s['profit']:+,}円</strong></div></div><div class="card"><div class="title">複勝1頭予想</div><div class="actions"><a class="btn green" href="/analyze">オッズ取得 → 1頭予想</a><a class="btn gold" href="/picks">今日の候補を見る</a></div></div>{draft}''')
 
 @app.route("/analyze",methods=["GET","POST"])
 def analyze():
     course=request.values.get("course",""); race=to_int(request.values.get("race",""),0)
     opts=''.join(f'<option {"selected" if c==course else ""}>{c}</option>' for c in NAR_COURSE_CODES)
     ropts=''.join(f'<option value="{n}" {"selected" if n==race else ""}>{n}R</option>' for n in range(1,13))
-    form=f'''<div class="card"><div class="title">複勝オッズ取得 → 本命1頭予想</div><form method="post"><div class="two"><div><label>競馬場</label><select name="course"><option value="">選択</option>{opts}</select></div><div><label>レース</label><select name="race"><option value="">選択</option>{ropts}</select></div></div><br><button class="green">本命1頭を分析</button></form></div>'''
-    if request.method=="GET" and request.args.get("auto")!="1": return page(form,"複勝1頭予想")
+    form=f'''<div class="card"><div class="title">単勝＋複勝オッズ取得 → 本命1頭予想</div><form method="post"><div class="two"><div><label>競馬場</label><select name="course"><option value="">選択</option>{opts}</select></div><div><label>レース</label><select name="race"><option value="">選択</option>{ropts}</select></div></div><br><button class="green">本命1頭を分析</button></form></div>'''
+    if request.method=="GET" and request.args.get("auto")!="1": return page(form,"単勝＋複勝 1頭予想")
     if course not in NAR_COURSE_CODES or not 1<=race<=12: return page(form+'<div class="bad">競馬場とレースを選んでください。</div>')
     try: horses=nar_get_horses(course,race)
     except Exception as e: return page(form+f'<div class="bad">取得エラー：{html.escape(type(e).__name__)} - {html.escape(str(e))}</div>')
@@ -334,19 +359,19 @@ def analyze():
     result=evaluate(horses,summary()["remaining"]); save_pick(course,race,result); recs=result["recs"]
     reasons=''.join(f'<li>{html.escape(x)}</li>' for x in result["reasons"])
     cards=''
-    for i,x in enumerate(recs,1):
-        cards+=f'''<div class="horse-card"><div><strong>{i}位候補</strong></div><div class="horse-no">{x['horse_no']}番</div><div class="horse-name">{html.escape(x['horse_name'])}</div><div class="pick-grid"><div><span>単勝</span><strong>{x['win_odds']:.1f}倍</strong></div><div><span>複勝</span><strong>{x['place_low']:.1f}～{x['place_high']:.1f}倍</strong></div><div><span>候補評価</span><strong>{x['confidence']}点</strong></div><div><span>優先度</span><strong>{x['priority_score']:.1f}</strong></div><div><span>参考EV</span><strong>{x['ev_index']:.2f}</strong><span>{x['ev_label']}</span></div></div></div>'''
+    for x in recs:
+        cards+=f'''<div class="horse-card"><div><strong>本日の推奨馬</strong></div><div class="horse-no">{x['horse_no']}番</div><div class="horse-name">{html.escape(x['horse_name'])}</div><div class="pick-grid"><div><span>単勝</span><strong>{x['win_odds']:.1f}倍</strong></div><div><span>複勝</span><strong>{x['place_low']:.1f}～{x['place_high']:.1f}倍</strong></div><div><span>候補評価</span><strong>{x['confidence']}点</strong></div><div><span>優先度</span><strong>{x['priority_score']:.1f}</strong></div><div><span>参考EV</span><strong>{x['ev_index']:.2f}</strong><span>{x['ev_label']}</span></div></div></div>'''
     button=''
     if recs:
         b=recs[0]; amount=recommended_amount(result["grade"],summary()["remaining"],b["place_low"])
         button=f'''<form method="post" action="/apply"><input type="hidden" name="course" value="{html.escape(course)}"><input type="hidden" name="race" value="{race}"><input type="hidden" name="horse_no" value="{b['horse_no']}"><input type="hidden" name="horse_name" value="{html.escape(b['horse_name'])}"><input type="hidden" name="place_low" value="{b['place_low']}"><input type="hidden" name="place_high" value="{b['place_high']}"><input type="hidden" name="grade" value="{result['grade']}"><input type="hidden" name="score" value="{result['score']}"><input type="hidden" name="ev_index" value="{b['ev_index']}"><input type="hidden" name="amount" value="{amount}"><button class="green">単勝100円＋複勝200円をホームへ入力（合計{amount:,}円）</button></form>'''
-    return page(form+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
+    return page(form+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。初版では市場オッズ中心の参考指数です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
 
 @app.post("/apply")
 def apply():
     item={"horse_no":to_int(request.form.get("horse_no")),"horse_name":request.form.get("horse_name",""),"place_low":to_float(request.form.get("place_low")),"place_high":to_float(request.form.get("place_high")),"ev_index":to_float(request.form.get("ev_index"))}
     grade=request.form.get("grade","見送り")
-    amount=recommended_amount(grade, summary()["remaining"], item["place_low"])
+    amount=fixed_amount(grade, summary()["remaining"], item["place_low"])
     save_draft(item,request.form.get("course",""),to_int(request.form.get("race")),grade,to_int(request.form.get("score")),amount)
     return redirect(url_for("home",msg="本命1頭をホームへ入力しました。"))
 
@@ -354,8 +379,8 @@ def apply():
 def record():
     d=get_draft()
     if not d: return redirect(url_for("home",msg="先に本命1頭を分析してください。"))
-    amount=int(d.get("amount") or 0)
-    if amount<100: return redirect(url_for("home",msg="見送り判定のため推奨購入額は0円です。"))
+    amount=fixed_amount(d.get("grade"), summary()["remaining"], d.get("place_low"))
+    if amount<100: return redirect(url_for("home",msg="B/見送り判定、または条件不足のため推奨購入額は0円です。"))
     if amount>summary()["remaining"]: return redirect(url_for("home",msg="本日の残り予算を超えています。"))
     with db() as con:
         con.execute("""INSERT INTO purchases(created_at,race_date,course,race,horse_no,horse_name,place_low,place_high,grade,score,ev_index,amount,result,return_amount) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
@@ -365,8 +390,8 @@ def record():
 @app.get("/picks")
 def picks():
     with db() as con: rows=con.execute("SELECT * FROM picks WHERE race_date=? ORDER BY CASE grade WHEN 'S' THEN 1 WHEN 'A' THEN 2 WHEN 'B' THEN 3 ELSE 9 END,score DESC",(today(),)).fetchall()
-    body=''.join(f'''<div class="horse-card"><div class="horse-name">{html.escape(r['course'])} {html.escape(r['race'])}　{r['horse_no']}番 {html.escape(r['horse_name'])}</div><div class="pick-grid"><div><span>判定</span><strong>{r['grade']}</strong></div><div><span>スコア</span><strong>{r['score']}</strong></div><div><span>複勝</span><strong>{r['place_low']:.1f}～{r['place_high']:.1f}</strong></div><div><span>参考EV</span><strong>{r['ev_index']:.2f}</strong></div></div></div>''' for r in rows) or '<div class="note">本日の分析済み本命はまだありません。</div>'
-    return page(f'<div class="card"><div class="title">今日の本命1頭</div>{body}</div>')
+    body=''.join(f'''<div class="horse-card"><div class="horse-name">{html.escape(r['course'])} {html.escape(r['race'])}　{r['horse_no']}番 {html.escape(r['horse_name'])}</div><div class="pick-grid"><div><span>判定</span><strong>{r['grade']}</strong></div><div><span>スコア</span><strong>{r['score']}</strong></div><div><span>複勝</span><strong>{r['place_low']:.1f}～{r['place_high']:.1f}</strong></div><div><span>参考EV</span><strong>{r['ev_index']:.2f}</strong></div></div></div>''' for r in rows) or '<div class="note">本日の分析済み候補はまだありません。</div>'
+    return page(f'<div class="card"><div class="title">今日の複勝候補</div>{body}</div>')
 
 
 def stat_box(where="",params=()):
@@ -421,9 +446,9 @@ def courses():
             links=' '.join(f'<a class="btn secondary" href="/analyze?course={urllib.parse.quote(c)}&race={n}&auto=1">{n}R</a>' for n in nums)
             blocks+=f'<div class="card"><div class="title">{html.escape(c)}</div><div class="actions">{links}</div></div>'
     if not blocks: blocks='<div class="note">現在取得できる開催情報がありません。NAR側の公開状況をご確認ください。</div>'
-    return page(f'<div class="card"><div class="title">本日の開催</div><div class="small">レース番号を押すと、そのまま本命1頭分析を実行します。</div></div>{blocks}')
+    return page(f'<div class="card"><div class="title">本日の開催</div><div class="small">レース番号を押すと、そのまま複勝1頭分析を実行します。</div></div>{blocks}')
 
 @app.get("/health")
-def health(): return "ok",200
+def health(): return "ok v2.5-300yen-fixed",200
 
 if __name__=="__main__": app.run(host="0.0.0.0",port=int(os.environ.get("PORT","5000")),debug=True)
