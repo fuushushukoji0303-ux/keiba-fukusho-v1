@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.1 - 近走・競馬場・距離適性版
+地方競馬 単勝＋複勝投票管理 v3.2 - 騎手評価版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -388,8 +388,159 @@ def nar_get_form_data(course_name, race_no, horses=None):
                 f=int(m.group(1))
                 if 1<=f<=30: recent.append(f)
                 if len(recent)>=5: break
-        result[horse_no]={"recent_finishes":recent[:5],"track":_record_stats(block,"場"),"distance":_record_stats(block,"距")}
+        jockey=""; jockey_affiliation=""
+        before_all=block.split(" 全 ",1)[0]
+        pairs=re.findall(r"([A-Za-zＡ-Ｚａ-ｚ一-龥々ヶヵァ-ヶー.．・]{2,16})\s*[（(]([^）)]+)[）)]",before_all)
+        for person,aff in pairs:
+            aff=str(aff).strip()
+            if aff in JOCKEY_CODES:
+                jockey=_jname(person); jockey_affiliation=aff; break
+
+        result[horse_no]={
+            "recent_finishes":recent[:5],
+            "track":_record_stats(block,"場"),
+            "distance":_record_stats(block,"距"),
+            "jockey":jockey,
+            "jockey_affiliation":jockey_affiliation,
+        }
     return result
+
+
+JOCKEY_CODES={
+    "北海道":"1","岩手":"2","金沢":"6","愛知":"7","笠松":"8",
+    "兵庫":"11","高知":"15","佐賀":"17","ばんえい":"21",
+    "大井":"26","川崎":"27","船橋":"28","浦和":"29"
+}
+_JOCKEY_CACHE={}
+
+
+def _jname(s):
+    return re.sub(r"[\s\u3000]+","",str(s or ""))
+
+
+def nar_get_jockey_leading(aff):
+    code=JOCKEY_CODES.get(str(aff or "").strip())
+    if not code:
+        return {}
+    key=(today(),code)
+    if key in _JOCKEY_CACHE:
+        return _JOCKEY_CACHE[key]
+
+    url=(
+        "https://www.keiba.go.jp/KeibaWeb/DataRoom/RiderLeading"
+        f"?k_nenndo={now().year}&k_out_flag=1&k_syozoku={code}&selectedOption=80"
+    )
+    req=urllib.request.Request(
+        url,
+        headers={
+            "User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) Chrome/140 Safari/537.36",
+            "Accept-Language":"ja-JP,ja;q=0.9",
+        },
+    )
+    with urllib.request.urlopen(req,timeout=15) as res:
+        raw=res.read()
+
+    page=None
+    for enc in ("utf-8","cp932","shift_jis"):
+        try:
+            page=raw.decode(enc); break
+        except UnicodeDecodeError:
+            pass
+    if page is None:
+        page=raw.decode("utf-8",errors="replace")
+
+    p=SimpleTableParser(); p.feed(page); out={}
+    for row in p.rows:
+        c=[" ".join(str(x).split()) for x in row]
+        if len(c)<12 or not re.fullmatch(r"\d+",c[0].replace(" ","")):
+            continue
+        def n(i):
+            try:
+                return float(re.sub(r"[^\d.-]","",c[i]))
+            except Exception:
+                return None
+        out[_jname(c[1])]={
+            "name":_jname(c[1]),"affiliation":c[2],
+            "wins":n(3),"seconds":n(4),"thirds":n(5),"total":n(9),
+            "win_rate":n(10),"quinella_rate":n(11),
+        }
+    _JOCKEY_CACHE[key]=out
+    return out
+
+
+def attach_jockey_stats(form_data):
+    for f in (form_data or {}).values():
+        name=_jname(f.get("jockey")); aff=str(f.get("jockey_affiliation") or "").strip()
+        f["jockey"]=name
+        f["jockey_stats"]=None
+        if not (name and aff):
+            continue
+        try:
+            leading=nar_get_jockey_leading(aff)
+            stat=leading.get(name)
+
+            # NAR出馬表の短縮名に対応
+            if stat is None:
+                cand=[v for k,v in leading.items() if k.startswith(name) or name.startswith(k)]
+                if len(cand)==1:
+                    stat=cand[0]
+
+            if stat is None and len(name)>=3:
+                def is_subsequence(shorter,longer):
+                    it=iter(longer)
+                    return all(ch in it for ch in shorter)
+                cand=[v for k,v in leading.items() if is_subsequence(name,k) or is_subsequence(k,name)]
+                if len(cand)==1:
+                    stat=cand[0]
+
+            f["jockey_stats"]=stat
+        except Exception:
+            pass
+    return form_data
+
+
+def jockey_rating(form):
+    """
+    単勝+複勝向け騎手評価。
+    勝率50%・連対率50%。データなしは50点の中立。
+    騎乗数50未満は50点側へ縮める。
+    """
+    if not form:
+        return 50.0
+    js=form.get("jockey_stats")
+    if not js:
+        return 50.0
+
+    wr=js.get("win_rate"); qr=js.get("quinella_rate")
+    if wr is None and qr is None:
+        return 50.0
+
+    parts=[]
+    if wr is not None:
+        win_score=max(0.0,min(100.0,50.0+(float(wr)-10.0)*3.0))
+        parts.append((win_score,0.50))
+    if qr is not None:
+        quinella_score=max(0.0,min(100.0,50.0+(float(qr)-20.0)*1.5))
+        parts.append((quinella_score,0.50))
+
+    raw=sum(v*w for v,w in parts)/sum(w for _,w in parts)
+    total=max(0.0,float(js.get("total") or 0))
+    sample_weight=min(1.0,total/50.0)
+    return round(50.0+(raw-50.0)*sample_weight,1)
+
+
+def jockey_display_values(form):
+    form=form or {}
+    name=form.get("jockey") or "取得なし"
+    js=form.get("jockey_stats") or {}
+    wr=js.get("win_rate")
+    qr=js.get("quinella_rate")
+    return (
+        name,
+        f"{wr:.1f}%" if wr is not None else "取得なし",
+        f"{qr:.1f}%" if qr is not None else "取得なし",
+    )
+
 
 
 def horse_form_rating(form):
@@ -450,9 +601,12 @@ def score_horses(horses, form_data=None):
         base_priority=round(confidence*0.60+ev_score*0.30+stability*0.10,1)
         form=form_data.get(int(h["horse_no"])) or {}
         form_rating=horse_form_rating(form)
+        jockey_score=jockey_rating(form)
         form_adjust=max(-4.0,min(4.0,(form_rating-50.0)*0.08))
-        priority=round(max(0.0,min(100.0,base_priority+form_adjust)),1)
-        x=dict(h); x.update({"mid":mid,"spread":spread,"confidence":confidence,"estimated_hit_pct":round(est_p*100,1),"ev_index":round(ev,2),"priority_score":priority,"base_priority_score":base_priority,"form_rating":form_rating,"form_adjust":round(form_adjust,1),"form_data":form,"ev_label":"妙味あり" if ev>=1.08 else "中立" if ev>=0.95 else "妙味薄め"})
+        # 騎手は最大±2点。v3.1の市場+実績ロジックを壊さない控えめ補正。
+        jockey_adjust=max(-2.0,min(2.0,(jockey_score-50.0)*0.04))
+        priority=round(max(0.0,min(100.0,base_priority+form_adjust+jockey_adjust)),1)
+        x=dict(h); x.update({"mid":mid,"spread":spread,"confidence":confidence,"estimated_hit_pct":round(est_p*100,1),"ev_index":round(ev,2),"priority_score":priority,"base_priority_score":base_priority,"form_rating":form_rating,"form_adjust":round(form_adjust,1),"jockey_rating":jockey_score,"jockey_adjust":round(jockey_adjust,1),"form_data":form,"ev_label":"妙味あり" if ev>=1.08 else "中立" if ev>=0.95 else "妙味薄め"})
         out.append(x)
     out.sort(key=lambda x:(x["priority_score"],x["confidence"],x["ev_index"]),reverse=True)
     return out
@@ -470,7 +624,8 @@ def evaluate(horses, remaining, form_data=None):
     place_only_low=int(200*best["place_low"])-300
     first_low=int(100*best["win_odds"]+200*best["place_low"])-300
     recent_text,track_text,distance_text=form_display_values(best.get("form_data"))
-    reasons=[f"候補評価：{best['confidence']}点",f"従来優先度：{best['base_priority_score']:.1f}",f"実績評価：{best['form_rating']:.1f}点（補正 {best['form_adjust']:+.1f}）",f"近5走：{recent_text}",f"競馬場成績 3着内率：{track_text}",f"距離成績 3着内率：{distance_text}",f"補正後優先度：{best['priority_score']:.1f}",f"単勝オッズ：{best['win_odds']:.1f}倍",f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",f"参考EV：{best['ev_index']:.2f}",f"単勝人気順位：{best['market_rank']}位",f"2～3着時の下限損益目安：{place_only_low:+,}円",f"1着時の下限損益目安：{first_low:+,}円"]
+    jockey_name,jockey_win,jockey_quinella=jockey_display_values(best.get("form_data"))
+    reasons=[f"候補評価：{best['confidence']}点",f"従来優先度：{best['base_priority_score']:.1f}",f"実績評価：{best['form_rating']:.1f}点（補正 {best['form_adjust']:+.1f}）",f"近5走：{recent_text}",f"競馬場成績 3着内率：{track_text}",f"距離成績 3着内率：{distance_text}",f"騎手：{jockey_name}",f"騎手勝率：{jockey_win}",f"騎手連対率：{jockey_quinella}",f"騎手評価：{best['jockey_rating']:.1f}点（補正 {best['jockey_adjust']:+.1f}）",f"補正後優先度：{best['priority_score']:.1f}",f"単勝オッズ：{best['win_odds']:.1f}倍",f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",f"参考EV：{best['ev_index']:.2f}",f"単勝人気順位：{best['market_rank']}位",f"2～3着時の下限損益目安：{place_only_low:+,}円",f"1着時の下限損益目安：{first_low:+,}円"]
     return {"grade":grade,"score":score,"recs":[best],"reasons":reasons}
 
 
@@ -550,7 +705,7 @@ def home():
         draft=f'''<div class="card"><div class="title">現在の本命1頭</div><div class="horse-card"><div class="horse-no">{d.get('horse_no','')}番</div><div class="horse-name">{html.escape(str(d.get('horse_name','')))}</div><div class="pick-grid"><div><span>複勝オッズ</span><strong>{float(d.get('place_low') or 0):.1f}～{float(d.get('place_high') or 0):.1f}倍</strong></div><div><span>判定</span><strong>{html.escape(str(d.get('grade','')))}</strong></div><div><span>参考EV</span><strong>{float(d.get('ev_index') or 0):.2f}</strong></div><div><span>買い方</span><strong>単勝100円＋複勝200円</strong></div></div></div><form method="post" action="/record"><button class="green">この1頭を購入記録へ</button></form></div>'''
     return page(f'''{msg_html}
 <div class="hero"><div class="title">単勝100円＋複勝200円・1頭勝負</div>
-<div>市場オッズを主役に、近走・競馬場・距離適性を控えめに加えた第一段階です。</div></div>
+<div>市場オッズを主役に、近走・競馬場・距離適性・騎手成績を控えめに加えた第二段階です。</div></div>
 <div class="quick-grid">
 <a class="quick" href="/courses"><strong>🏇 本日の開催</strong><span>競馬場ごとに全レース一括予想</span></a>
 <a class="quick" href="/closing-soon"><strong>⏱ 発走5分前</strong><span>発走が近いレースだけ抽出</span></a>
@@ -570,18 +725,19 @@ def analyze():
     if not horses: return page(form+'<div class="note">単勝・複勝オッズを取得できませんでした。発売前・締切後・更新中の可能性があります。</div>')
     try:
         form_data=nar_get_form_data(course,race,horses)
+        attach_jockey_stats(form_data)
     except Exception:
         form_data={}
     remaining=summary()["remaining"]; result=evaluate(horses,remaining,form_data); save_pick(course,race,result); save_validation_prediction(course,race,result,remaining); recs=result["recs"]
     reasons=''.join(f'<li>{html.escape(x)}</li>' for x in result["reasons"])
     cards=''
     for i,x in enumerate(recs,1):
-        cards+=f'''<div class="horse-card"><div><strong>{i}位候補</strong></div><div class="horse-no">{x['horse_no']}番</div><div class="horse-name">{html.escape(x['horse_name'])}</div><div class="pick-grid"><div><span>単勝</span><strong>{x['win_odds']:.1f}倍</strong></div><div><span>複勝</span><strong>{x['place_low']:.1f}～{x['place_high']:.1f}倍</strong></div><div><span>候補評価</span><strong>{x['confidence']}点</strong></div><div><span>優先度</span><strong>{x['priority_score']:.1f}</strong></div><div><span>参考EV</span><strong>{x['ev_index']:.2f}</strong><span>{x['ev_label']}</span></div><div><span>実績評価</span><strong>{x.get('form_rating',50):.1f}点</strong></div><div><span>従来優先度</span><strong>{x.get('base_priority_score',x['priority_score']):.1f}</strong></div></div></div>'''
+        cards+=f'''<div class="horse-card"><div><strong>{i}位候補</strong></div><div class="horse-no">{x['horse_no']}番</div><div class="horse-name">{html.escape(x['horse_name'])}</div><div class="pick-grid"><div><span>単勝</span><strong>{x['win_odds']:.1f}倍</strong></div><div><span>複勝</span><strong>{x['place_low']:.1f}～{x['place_high']:.1f}倍</strong></div><div><span>候補評価</span><strong>{x['confidence']}点</strong></div><div><span>優先度</span><strong>{x['priority_score']:.1f}</strong></div><div><span>参考EV</span><strong>{x['ev_index']:.2f}</strong><span>{x['ev_label']}</span></div><div><span>実績評価</span><strong>{x.get('form_rating',50):.1f}点</strong></div><div><span>騎手評価</span><strong>{x.get('jockey_rating',50):.1f}点</strong></div><div><span>従来優先度</span><strong>{x.get('base_priority_score',x['priority_score']):.1f}</strong></div></div></div>'''
     button=''
     if recs:
         b=recs[0]; amount=recommended_amount(result["grade"],summary()["remaining"],b["place_low"])
         button=f'''<form method="post" action="/apply"><input type="hidden" name="course" value="{html.escape(course)}"><input type="hidden" name="race" value="{race}"><input type="hidden" name="horse_no" value="{b['horse_no']}"><input type="hidden" name="horse_name" value="{html.escape(b['horse_name'])}"><input type="hidden" name="place_low" value="{b['place_low']}"><input type="hidden" name="place_high" value="{b['place_high']}"><input type="hidden" name="grade" value="{result['grade']}"><input type="hidden" name="score" value="{result['score']}"><input type="hidden" name="ev_index" value="{b['ev_index']}"><input type="hidden" name="amount" value="{amount}"><button class="green">単勝100円＋複勝200円をホームへ入力（合計{amount:,}円）</button></form>'''
-    return page(form+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズを主役に、近走・競馬場・距離適性を控えめに補正しています。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
+    return page(form+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズを主役に、近走・競馬場・距離適性・騎手成績を控えめに補正しています。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
 
 @app.post("/apply")
 def apply():
@@ -722,6 +878,7 @@ def batch_predict_course(course, remaining):
                 return race_no, "skip", "単勝・複勝未発売・取得不可", None
             try:
                 form_data = nar_get_form_data(course, race_no, horses)
+                attach_jockey_stats(form_data)
             except Exception:
                 form_data = {}
             return race_no, "ok", "", evaluate(horses, remaining, form_data)
@@ -763,6 +920,7 @@ def render_batch_cards(course, rows, remaining):
             f'<div><span>参考EV</span><strong>{b["ev_index"]:.2f}</strong></div>'
             f'<div><span>推奨額</span><strong>{amount:,}円</strong></div>'
             f'<div><span>実績評価</span><strong>{b.get("form_rating",50):.1f}点</strong></div>'
+            f'<div><span>騎手評価</span><strong>{b.get("jockey_rating",50):.1f}点</strong></div>'
             '</div>'
             f'<div class="actions" style="margin-top:8px"><a class="btn secondary" href="/analyze?course={urllib.parse.quote(course)}&race={race_no}&auto=1">詳しく見る</a></div>'
             '</div>'
@@ -828,6 +986,7 @@ def closing_soon():
             continue
         try:
             form_data = nar_get_form_data(x["course"], x["race"], horses)
+            attach_jockey_stats(form_data)
         except Exception:
             form_data = {}
         result = evaluate(horses, remaining, form_data)
