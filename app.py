@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.2 - 騎手評価版
+地方競馬 単勝＋複勝投票管理 v3.3 - 脚質・展開確認版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -396,12 +396,16 @@ def nar_get_form_data(course_name, race_no, horses=None):
             if aff in JOCKEY_CODES:
                 jockey=_jname(person); jockey_affiliation=aff; break
 
+        corner_histories=_extract_corner_histories(block)
+        running_style=running_style_from_corners(corner_histories)
         result[horse_no]={
             "recent_finishes":recent[:5],
             "track":_record_stats(block,"場"),
             "distance":_record_stats(block,"距"),
             "jockey":jockey,
             "jockey_affiliation":jockey_affiliation,
+            "corner_histories":corner_histories,
+            "running_style":running_style,
         }
     return result
 
@@ -497,6 +501,93 @@ def attach_jockey_stats(form_data):
         except Exception:
             pass
     return form_data
+
+
+def _extract_corner_histories(block):
+    normalized=re.sub(r"\s+"," ",str(block or ""))
+    seqs=re.findall(
+        r"(?<!\d)(\d{1,2}(?:-\d{1,2}){1,3})\s+(?=\d{2}\.\d\b)",
+        normalized
+    )
+    out=[]
+    for s in seqs:
+        try:
+            vals=[int(x) for x in s.split("-")]
+        except Exception:
+            continue
+        if 2<=len(vals)<=4 and all(1<=x<=30 for x in vals):
+            out.append(vals)
+        if len(out)>=5:
+            break
+    return out
+
+
+def running_style_from_corners(histories):
+    hs=[h for h in (histories or []) if h]
+    if not hs:
+        return {"style":"取得なし","confidence":0,"avg_first":None}
+    firsts=[h[0] for h in hs]
+    weights=[1.35,1.20,1.10,1.00,0.90][:len(firsts)]
+    avg=sum(v*w for v,w in zip(firsts,weights))/sum(weights)
+    if avg<=1.7:
+        style="逃げ"
+    elif avg<=4.0:
+        style="先行"
+    elif avg<=8.0:
+        style="差し"
+    else:
+        style="追込"
+    return {
+        "style":style,
+        "confidence":min(100,35+13*len(firsts)),
+        "avg_first":round(avg,1),
+    }
+
+
+def predict_race_pace(form_data):
+    counts={"逃げ":0,"先行":0,"差し":0,"追込":0}
+    usable=0
+    for f in (form_data or {}).values():
+        style=(f.get("running_style") or {}).get("style","取得なし")
+        if style in counts:
+            counts[style]+=1
+            usable+=1
+
+    if usable==0:
+        return {
+            "pace":"判定不能",
+            "counts":counts,
+            "comment":"脚質データが足りないため、展開はまだ判定できません。"
+        }
+
+    nige=counts["逃げ"]
+    front=counts["逃げ"]+counts["先行"]
+    ratio=front/usable
+
+    if nige>=3 or (nige>=2 and ratio>=0.50):
+        pace="ハイペース寄り"
+        comment="前に行きたい馬が多く、前半が速くなる可能性があります。差し・追込にも注意です。"
+    elif (nige==0 and ratio<=0.35) or (nige<=1 and ratio<=0.45):
+        pace="スローペース寄り"
+        comment="前へ行く馬が少なく、前残りになりやすい構成です。逃げ・先行に注意です。"
+    else:
+        pace="平均ペース"
+        comment="極端な前傾・後傾にはなりにくい構成です。"
+
+    return {"pace":pace,"counts":counts,"comment":comment}
+
+
+def running_style_text(form):
+    rs=(form or {}).get("running_style") or {}
+    style=rs.get("style","取得なし")
+    conf=int(rs.get("confidence") or 0)
+    return "取得なし" if style=="取得なし" else f"{style} ({conf}%)"
+
+
+def corner_history_text(form):
+    hs=(form or {}).get("corner_histories") or []
+    return "取得なし" if not hs else " / ".join("-".join(str(x) for x in h) for h in hs[:5])
+
 
 
 def jockey_rating(form):
@@ -625,7 +716,9 @@ def evaluate(horses, remaining, form_data=None):
     first_low=int(100*best["win_odds"]+200*best["place_low"])-300
     recent_text,track_text,distance_text=form_display_values(best.get("form_data"))
     jockey_name,jockey_win,jockey_quinella=jockey_display_values(best.get("form_data"))
-    reasons=[f"候補評価：{best['confidence']}点",f"従来優先度：{best['base_priority_score']:.1f}",f"実績評価：{best['form_rating']:.1f}点（補正 {best['form_adjust']:+.1f}）",f"近5走：{recent_text}",f"競馬場成績 3着内率：{track_text}",f"距離成績 3着内率：{distance_text}",f"騎手：{jockey_name}",f"騎手勝率：{jockey_win}",f"騎手連対率：{jockey_quinella}",f"騎手評価：{best['jockey_rating']:.1f}点（補正 {best['jockey_adjust']:+.1f}）",f"補正後優先度：{best['priority_score']:.1f}",f"単勝オッズ：{best['win_odds']:.1f}倍",f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",f"参考EV：{best['ev_index']:.2f}",f"単勝人気順位：{best['market_rank']}位",f"2～3着時の下限損益目安：{place_only_low:+,}円",f"1着時の下限損益目安：{first_low:+,}円"]
+    corner_text=corner_history_text(best.get("form_data"))
+    style_text=running_style_text(best.get("form_data"))
+    reasons=[f"候補評価：{best['confidence']}点",f"従来優先度：{best['base_priority_score']:.1f}",f"実績評価：{best['form_rating']:.1f}点（補正 {best['form_adjust']:+.1f}）",f"近5走：{recent_text}",f"競馬場成績 3着内率：{track_text}",f"距離成績 3着内率：{distance_text}",f"騎手：{jockey_name}",f"騎手勝率：{jockey_win}",f"騎手連対率：{jockey_quinella}",f"騎手評価：{best['jockey_rating']:.1f}点（補正 {best['jockey_adjust']:+.1f}）",f"過去走 通過順：{corner_text}",f"脚質判定：{style_text}",f"補正後優先度：{best['priority_score']:.1f}",f"単勝オッズ：{best['win_odds']:.1f}倍",f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",f"参考EV：{best['ev_index']:.2f}",f"単勝人気順位：{best['market_rank']}位",f"2～3着時の下限損益目安：{place_only_low:+,}円",f"1着時の下限損益目安：{first_low:+,}円"]
     return {"grade":grade,"score":score,"recs":[best],"reasons":reasons}
 
 
@@ -705,7 +798,7 @@ def home():
         draft=f'''<div class="card"><div class="title">現在の本命1頭</div><div class="horse-card"><div class="horse-no">{d.get('horse_no','')}番</div><div class="horse-name">{html.escape(str(d.get('horse_name','')))}</div><div class="pick-grid"><div><span>複勝オッズ</span><strong>{float(d.get('place_low') or 0):.1f}～{float(d.get('place_high') or 0):.1f}倍</strong></div><div><span>判定</span><strong>{html.escape(str(d.get('grade','')))}</strong></div><div><span>参考EV</span><strong>{float(d.get('ev_index') or 0):.2f}</strong></div><div><span>買い方</span><strong>単勝100円＋複勝200円</strong></div></div></div><form method="post" action="/record"><button class="green">この1頭を購入記録へ</button></form></div>'''
     return page(f'''{msg_html}
 <div class="hero"><div class="title">単勝100円＋複勝200円・1頭勝負</div>
-<div>市場オッズを主役に、近走・競馬場・距離適性・騎手成績を控えめに加えた第二段階です。</div></div>
+<div>市場オッズ・実績・騎手評価に加え、過去走の通過順から脚質とレース全体のペースを確認できる第三段階です。</div></div>
 <div class="quick-grid">
 <a class="quick" href="/courses"><strong>🏇 本日の開催</strong><span>競馬場ごとに全レース一括予想</span></a>
 <a class="quick" href="/closing-soon"><strong>⏱ 発走5分前</strong><span>発走が近いレースだけ抽出</span></a>
@@ -728,7 +821,7 @@ def analyze():
         attach_jockey_stats(form_data)
     except Exception:
         form_data={}
-    remaining=summary()["remaining"]; result=evaluate(horses,remaining,form_data); save_pick(course,race,result); save_validation_prediction(course,race,result,remaining); recs=result["recs"]
+    remaining=summary()["remaining"]; result=evaluate(horses,remaining,form_data); pace_now=predict_race_pace(form_data); save_pick(course,race,result); save_validation_prediction(course,race,result,remaining); recs=result["recs"]
     reasons=''.join(f'<li>{html.escape(x)}</li>' for x in result["reasons"])
     cards=''
     for i,x in enumerate(recs,1):
@@ -737,7 +830,21 @@ def analyze():
     if recs:
         b=recs[0]; amount=recommended_amount(result["grade"],summary()["remaining"],b["place_low"])
         button=f'''<form method="post" action="/apply"><input type="hidden" name="course" value="{html.escape(course)}"><input type="hidden" name="race" value="{race}"><input type="hidden" name="horse_no" value="{b['horse_no']}"><input type="hidden" name="horse_name" value="{html.escape(b['horse_name'])}"><input type="hidden" name="place_low" value="{b['place_low']}"><input type="hidden" name="place_high" value="{b['place_high']}"><input type="hidden" name="grade" value="{result['grade']}"><input type="hidden" name="score" value="{result['score']}"><input type="hidden" name="ev_index" value="{b['ev_index']}"><input type="hidden" name="amount" value="{amount}"><button class="green">単勝100円＋複勝200円をホームへ入力（合計{amount:,}円）</button></form>'''
-    return page(form+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズを主役に、近走・競馬場・距離適性・騎手成績を控えめに補正しています。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
+    pc=pace_now["counts"]
+    pace_html=(
+        '<div class="card"><div class="title">展開・ペース予測（確認中）</div>'
+        f'<div class="grade">{pace_now["pace"]}</div>'
+        '<div class="pick-grid">'
+        f'<div><span>逃げ</span><strong>{pc["逃げ"]}</strong></div>'
+        f'<div><span>先行</span><strong>{pc["先行"]}</strong></div>'
+        f'<div><span>差し</span><strong>{pc["差し"]}</strong></div>'
+        f'<div><span>追込</span><strong>{pc["追込"]}</strong></div>'
+        '</div>'
+        f'<div class="note" style="margin-top:8px">{html.escape(pace_now["comment"])}</div>'
+        '<div class="small">※v3.3では脚質・展開は確認表示のみで、予想点にはまだ反映していません。</div>'
+        '</div>'
+    )
+    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績を補正に使い、脚質・展開はv3.3では確認表示のみです。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
 
 @app.post("/apply")
 def apply():
