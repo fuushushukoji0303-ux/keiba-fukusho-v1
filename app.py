@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.3.1 - パカお・パカ美デザイン版
+地方競馬 単勝＋複勝投票管理 v3.5 - 着差＋上がり3F確認版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -350,6 +350,36 @@ def _record_stats(text, label):
     return {"wins":w,"seconds":s,"thirds":t3,"others":o,"total":total,"top3_rate":round(rate,1) if rate is not None else None}
 
 
+
+def _extract_margin_final3f(block):
+    """
+    NAR出馬表の過去走から「着差」と「上がり3F」を確認用に取得。
+    例: 1458（1.2） 1-1-1-1 42.1
+    現段階では予想スコアには反映しない。
+    """
+    normalized=re.sub(r"\s+"," ",str(block or ""))
+    out=[]
+    pattern=(
+        r"(?<!\d)\d{3,4}\s*[（(]\s*([+-]?\d+(?:\.\d+)?)\s*[）)]"
+        r"\s+(\d{1,2}(?:-\d{1,2}){1,3})\s+(\d{2}\.\d)(?!\d)"
+    )
+    for m in re.finditer(pattern, normalized):
+        try:
+            margin=float(m.group(1))
+            final3f=float(m.group(3))
+        except Exception:
+            continue
+        if not (0.0 <= abs(margin) <= 20.0 and 25.0 <= final3f <= 60.0):
+            continue
+        out.append({
+            "margin":round(margin,1),
+            "corners":m.group(2),
+            "final3f":round(final3f,1),
+        })
+        if len(out)>=5:
+            break
+    return out
+
 def nar_get_form_data(course_name, race_no, horses=None):
     url=nar_url("DebaTable",course_name,race_no)
     req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36","Accept-Language":"ja-JP,ja;q=0.9"})
@@ -397,6 +427,7 @@ def nar_get_form_data(course_name, race_no, horses=None):
 
         corner_histories=_extract_corner_histories(block)
         running_style=running_style_from_corners(corner_histories)
+        margin_final3f=_extract_margin_final3f(block)
         result[horse_no]={
             "recent_finishes":recent[:5],
             "track":_record_stats(block,"場"),
@@ -405,6 +436,7 @@ def nar_get_form_data(course_name, race_no, horses=None):
             "jockey_affiliation":jockey_affiliation,
             "corner_histories":corner_histories,
             "running_style":running_style,
+            "margin_final3f":margin_final3f,
         }
     return result
 
@@ -588,6 +620,15 @@ def corner_history_text(form):
     return "取得なし" if not hs else " / ".join("-".join(str(x) for x in h) for h in hs[:5])
 
 
+def margin_final3f_display(form):
+    rows=(form or {}).get("margin_final3f") or []
+    if not rows:
+        return "取得なし","取得なし"
+    margins="・".join(f'{float(x["margin"]):.1f}' for x in rows[:5])
+    final3f="・".join(f'{float(x["final3f"]):.1f}' for x in rows[:5])
+    return margins,final3f
+
+
 
 def jockey_rating(form):
     """
@@ -717,7 +758,8 @@ def evaluate(horses, remaining, form_data=None):
     jockey_name,jockey_win,jockey_quinella=jockey_display_values(best.get("form_data"))
     corner_text=corner_history_text(best.get("form_data"))
     style_text=running_style_text(best.get("form_data"))
-    reasons=[f"候補評価：{best['confidence']}点",f"従来優先度：{best['base_priority_score']:.1f}",f"実績評価：{best['form_rating']:.1f}点（補正 {best['form_adjust']:+.1f}）",f"近5走：{recent_text}",f"競馬場成績 3着内率：{track_text}",f"距離成績 3着内率：{distance_text}",f"騎手：{jockey_name}",f"騎手勝率：{jockey_win}",f"騎手連対率：{jockey_quinella}",f"騎手評価：{best['jockey_rating']:.1f}点（補正 {best['jockey_adjust']:+.1f}）",f"過去走 通過順：{corner_text}",f"脚質判定：{style_text}",f"補正後優先度：{best['priority_score']:.1f}",f"単勝オッズ：{best['win_odds']:.1f}倍",f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",f"参考EV：{best['ev_index']:.2f}",f"単勝人気順位：{best['market_rank']}位",f"2～3着時の下限損益目安：{place_only_low:+,}円",f"1着時の下限損益目安：{first_low:+,}円"]
+    margin_text,final3f_text=margin_final3f_display(best.get("form_data"))
+    reasons=[f"候補評価：{best['confidence']}点",f"従来優先度：{best['base_priority_score']:.1f}",f"実績評価：{best['form_rating']:.1f}点（補正 {best['form_adjust']:+.1f}）",f"近5走：{recent_text}",f"過去走 着差：{margin_text}",f"過去走 上がり3F：{final3f_text}",f"競馬場成績 3着内率：{track_text}",f"距離成績 3着内率：{distance_text}",f"騎手：{jockey_name}",f"騎手勝率：{jockey_win}",f"騎手連対率：{jockey_quinella}",f"騎手評価：{best['jockey_rating']:.1f}点（補正 {best['jockey_adjust']:+.1f}）",f"過去走 通過順：{corner_text}",f"脚質判定：{style_text}",f"補正後優先度：{best['priority_score']:.1f}",f"単勝オッズ：{best['win_odds']:.1f}倍",f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",f"参考EV：{best['ev_index']:.2f}",f"単勝人気順位：{best['market_rank']}位",f"2～3着時の下限損益目安：{place_only_low:+,}円",f"1着時の下限損益目安：{first_low:+,}円"]
     return {"grade":grade,"score":score,"recs":[best],"reasons":reasons}
 
 
@@ -1225,7 +1267,7 @@ def home():
         draft=f'''<div class="card"><div class="title">現在の本命1頭</div><div class="horse-card"><div class="horse-no">{d.get('horse_no','')}番</div><div class="horse-name">{html.escape(str(d.get('horse_name','')))}</div><div class="pick-grid"><div><span>複勝オッズ</span><strong>{float(d.get('place_low') or 0):.1f}～{float(d.get('place_high') or 0):.1f}倍</strong></div><div><span>判定</span><strong>{html.escape(str(d.get('grade','')))}</strong></div><div><span>参考EV</span><strong>{float(d.get('ev_index') or 0):.2f}</strong></div><div><span>買い方</span><strong>単勝100円＋複勝200円</strong></div></div></div><form method="post" action="/record"><button class="green">この1頭を購入記録へ</button></form></div>'''
     return page(f'''{msg_html}
 <div class="hero"><div class="title">単勝100円＋複勝200円・1頭勝負</div>
-<div>市場オッズ・実績・騎手評価に加え、過去走の通過順から脚質とレース全体のペースを確認できる第三段階です。</div></div>
+<div>市場オッズ・実績・騎手評価・脚質・ペースに加え、過去走の着差と上がり3Fを確認できる第四段階です。</div></div>
 <div class="quick-grid">
 <a class="quick" href="/courses"><strong>🏇 本日の開催</strong><span>競馬場ごとに全レース一括予想</span></a>
 <a class="quick" href="/closing-soon"><strong>⏱ 発走5分前</strong><span>発走が近いレースだけ抽出</span></a>
@@ -1271,7 +1313,7 @@ def analyze():
         '<div class="small">※v3.3では脚質・展開は確認表示のみで、予想点にはまだ反映していません。</div>'
         '</div>'
     )
-    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績を補正に使い、脚質・展開はv3.3では確認表示のみです。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
+    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績を補正に使用しています。着差・上がり3Fはv3.5では取得確認のみで、まだ予想点には反映していません。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
 
 @app.post("/apply")
 def apply():
