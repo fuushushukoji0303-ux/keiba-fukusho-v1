@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.5.3 - 印刷用出馬表タイム差取得版
+地方競馬 単勝＋複勝投票管理 v3.6 - 印刷用出馬表タイム差取得版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -16,6 +16,7 @@
 的中や利益を保証するものではありません。
 """
 from __future__ import annotations
+import statistics
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
@@ -829,6 +830,109 @@ def jockey_display_values(form):
 
 
 
+
+def margin_final3f_test_adjust(form):
+    """
+    v3.6 テスト補正。
+    ・タイム差: 最大±1.5点
+      1着は「1着馬との差」ではなく2着馬との差なので、負け差0として扱い、
+      勝ち幅はごく小さな加点にする。
+    ・上がり3F: 最大±0.5点
+      競馬場・距離・馬場で絶対値が変わるため、絶対タイムを他馬と直接比較しない。
+      同じ馬の取得済み過去走の中央値に対する「直近の傾向」だけを弱く見る。
+    ・合計最大±2.0点。既存ロジックを主役のままにする。
+    """
+    form=form or {}
+    rows=list(form.get("margin_final3f") or [])[:5]
+    finishes=list(form.get("recent_finishes") or [])[:5]
+
+    # --- タイム差補正 ---
+    margin_vals=[]
+    win_bonus=0.0
+    for i,row in enumerate(rows):
+        m=row.get("margin")
+        if m is None:
+            continue
+        try:
+            m=abs(float(m))
+        except Exception:
+            continue
+        finish=None
+        if i < len(finishes):
+            try:
+                finish=int(finishes[i])
+            except Exception:
+                finish=None
+        # 1着時の括弧内は2着馬との差なので「負け差」としては0。
+        if finish == 1:
+            margin_vals.append(0.0)
+            win_bonus += min(0.20, m*0.08)
+        else:
+            margin_vals.append(min(10.0,m))
+
+    if margin_vals:
+        weights=[1.40,1.25,1.10,1.00,0.90][:len(margin_vals)]
+        avg_gap=sum(v*w for v,w in zip(margin_vals,weights))/sum(weights)
+        # 0.5秒以内は加点、1秒前後はほぼ中立、2秒超から減点を強める。
+        if avg_gap <= 0.5:
+            margin_adjust=1.2
+        elif avg_gap <= 1.0:
+            margin_adjust=0.6
+        elif avg_gap <= 1.5:
+            margin_adjust=0.1
+        elif avg_gap <= 2.0:
+            margin_adjust=-0.4
+        elif avg_gap <= 3.0:
+            margin_adjust=-0.9
+        else:
+            margin_adjust=-1.5
+        margin_adjust=max(-1.5,min(1.5,margin_adjust+win_bonus))
+    else:
+        avg_gap=None
+        margin_adjust=0.0
+
+    # --- 上がり3F補正 ---
+    # 絶対値は競馬場・距離・馬場差が大きいので、同馬内の最近傾向のみ弱く使用。
+    final_vals=[]
+    for row in rows:
+        f=row.get("final3f")
+        if f is None:
+            continue
+        try:
+            f=float(f)
+        except Exception:
+            continue
+        if 25.0 <= f <= 60.0:
+            final_vals.append(f)
+
+    final3f_adjust=0.0
+    final3f_trend=None
+    if len(final_vals) >= 3:
+        med=statistics.median(final_vals)
+        recent=final_vals[:2] if len(final_vals)>=2 else final_vals[:1]
+        recent_avg=sum(recent)/len(recent)
+        # 秒数は小さいほど速い。差は同馬内比較だけ。
+        improvement=med-recent_avg
+        final3f_trend=round(improvement,2)
+        if improvement >= 1.5:
+            final3f_adjust=0.5
+        elif improvement >= 0.6:
+            final3f_adjust=0.3
+        elif improvement <= -1.5:
+            final3f_adjust=-0.5
+        elif improvement <= -0.6:
+            final3f_adjust=-0.3
+
+    total=max(-2.0,min(2.0,margin_adjust+final3f_adjust))
+    return {
+        "total":round(total,1),
+        "margin_adjust":round(margin_adjust,1),
+        "final3f_adjust":round(final3f_adjust,1),
+        "avg_gap":None if avg_gap is None else round(avg_gap,2),
+        "final3f_trend":final3f_trend,
+    }
+
+
 def horse_form_rating(form):
     if not form: return 50.0
     parts=[]
@@ -888,11 +992,14 @@ def score_horses(horses, form_data=None):
         form=form_data.get(int(h["horse_no"])) or {}
         form_rating=horse_form_rating(form)
         jockey_score=jockey_rating(form)
+        margin3f=margin_final3f_test_adjust(form)
         form_adjust=max(-4.0,min(4.0,(form_rating-50.0)*0.08))
-        # 騎手は最大±2点。v3.1の市場+実績ロジックを壊さない控えめ補正。
+        # 騎手は最大±2点。既存の市場+実績ロジックを壊さない控えめ補正。
         jockey_adjust=max(-2.0,min(2.0,(jockey_score-50.0)*0.04))
-        priority=round(max(0.0,min(100.0,base_priority+form_adjust+jockey_adjust)),1)
-        x=dict(h); x.update({"mid":mid,"spread":spread,"confidence":confidence,"estimated_hit_pct":round(est_p*100,1),"ev_index":round(ev,2),"priority_score":priority,"base_priority_score":base_priority,"form_rating":form_rating,"form_adjust":round(form_adjust,1),"jockey_rating":jockey_score,"jockey_adjust":round(jockey_adjust,1),"form_data":form,"ev_label":"妙味あり" if ev>=1.08 else "中立" if ev>=0.95 else "妙味薄め"})
+        # v3.6テスト: タイム差+上がり3Fは合計最大±2点だけ。
+        margin3f_adjust=float(margin3f["total"])
+        priority=round(max(0.0,min(100.0,base_priority+form_adjust+jockey_adjust+margin3f_adjust)),1)
+        x=dict(h); x.update({"mid":mid,"spread":spread,"confidence":confidence,"estimated_hit_pct":round(est_p*100,1),"ev_index":round(ev,2),"priority_score":priority,"base_priority_score":base_priority,"form_rating":form_rating,"form_adjust":round(form_adjust,1),"jockey_rating":jockey_score,"jockey_adjust":round(jockey_adjust,1),"margin3f_adjust":round(margin3f_adjust,1),"margin_adjust":margin3f["margin_adjust"],"final3f_adjust":margin3f["final3f_adjust"],"avg_gap":margin3f["avg_gap"],"final3f_trend":margin3f["final3f_trend"],"form_data":form,"ev_label":"妙味あり" if ev>=1.08 else "中立" if ev>=0.95 else "妙味薄め"})
         out.append(x)
     out.sort(key=lambda x:(x["priority_score"],x["confidence"],x["ev_index"]),reverse=True)
     return out
@@ -914,7 +1021,7 @@ def evaluate(horses, remaining, form_data=None):
     corner_text=corner_history_text(best.get("form_data"))
     style_text=running_style_text(best.get("form_data"))
     margin_text,final3f_text=margin_final3f_display(best.get("form_data"))
-    reasons=[f"候補評価：{best['confidence']}点",f"従来優先度：{best['base_priority_score']:.1f}",f"実績評価：{best['form_rating']:.1f}点（補正 {best['form_adjust']:+.1f}）",f"近5走：{recent_text}",f"過去走 タイム差：{margin_text}",f"過去走 上がり3F：{final3f_text}",f"競馬場成績 3着内率：{track_text}",f"距離成績 3着内率：{distance_text}",f"騎手：{jockey_name}",f"騎手勝率：{jockey_win}",f"騎手連対率：{jockey_quinella}",f"騎手評価：{best['jockey_rating']:.1f}点（補正 {best['jockey_adjust']:+.1f}）",f"過去走 通過順：{corner_text}",f"脚質判定：{style_text}",f"補正後優先度：{best['priority_score']:.1f}",f"単勝オッズ：{best['win_odds']:.1f}倍",f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",f"参考EV：{best['ev_index']:.2f}",f"単勝人気順位：{best['market_rank']}位",f"2～3着時の下限損益目安：{place_only_low:+,}円",f"1着時の下限損益目安：{first_low:+,}円"]
+    reasons=[f"候補評価：{best['confidence']}点",f"従来優先度：{best['base_priority_score']:.1f}",f"実績評価：{best['form_rating']:.1f}点（補正 {best['form_adjust']:+.1f}）",f"近5走：{recent_text}",f"過去走 タイム差：{margin_text}",f"過去走 上がり3F：{final3f_text}",f"タイム差補正（テスト）：{best.get('margin_adjust',0):+.1f}",f"上がり3F補正（テスト）：{best.get('final3f_adjust',0):+.1f}",f"タイム差＋上がり3F補正：{best.get('margin3f_adjust',0):+.1f}",f"競馬場成績 3着内率：{track_text}",f"距離成績 3着内率：{distance_text}",f"騎手：{jockey_name}",f"騎手勝率：{jockey_win}",f"騎手連対率：{jockey_quinella}",f"騎手評価：{best['jockey_rating']:.1f}点（補正 {best['jockey_adjust']:+.1f}）",f"過去走 通過順：{corner_text}",f"脚質判定：{style_text}",f"補正後優先度：{best['priority_score']:.1f}",f"単勝オッズ：{best['win_odds']:.1f}倍",f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",f"参考EV：{best['ev_index']:.2f}",f"単勝人気順位：{best['market_rank']}位",f"2～3着時の下限損益目安：{place_only_low:+,}円",f"1着時の下限損益目安：{first_low:+,}円"]
     return {"grade":grade,"score":score,"recs":[best],"reasons":reasons}
 
 
