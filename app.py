@@ -36,7 +36,6 @@ APP_TITLE = "パカおとパカ美のワクワク競馬 単勝＋複勝"
 DAILY_LIMIT = 3000
 DEFAULT_BET = 300
 NAR_BASE_URL = "https://www.keiba.go.jp/KeibaWeb/TodayRaceInfo"
-SPAT4_URL = "https://www.spat4.jp/keiba/pc"
 
 NAR_COURSE_CODES = {
     "門別": 36, "盛岡": 10, "水沢": 11, "浦和": 18, "船橋": 19,
@@ -1231,7 +1230,7 @@ def home():
 <a class="quick" href="/courses"><strong>🏇 本日の開催</strong><span>競馬場ごとに全レース一括予想</span></a>
 <a class="quick" href="/closing-soon"><strong>⏱ 発走5分前</strong><span>発走が近いレースだけ抽出</span></a>
 <a class="quick" href="/validation"><strong>📊 予想検証</strong><span>NAR公式結果で自動採点</span></a>
-</div><div class="grid home-metrics"><div class="card metric"><small>💰 本日の上限</small><strong>{DAILY_LIMIT:,}円</strong></div><div class="card metric"><small>🪙 使用額</small><strong>{s['bet']:,}円</strong></div><div class="card metric"><small>👛 残り予算</small><strong>{s['remaining']:,}円</strong></div><div class="card metric"><small>📊 本日の収支</small><strong>{s['profit']:+,}円</strong></div><a class="card metric validation-metric" href="/validation"><small>✓ 予想検証</small><strong>自動採点</strong><span>NAR公式結果で確認</span></a></div><div class="card"><div class="title">単勝100円＋複勝200円・1頭勝負</div><div class="actions"><a class="btn green" href="/analyze">オッズ取得 → 本命1頭予想</a><a class="btn gold" href="/picks">今日の本命を見る</a><a class="btn secondary" href="https://www.spat4.jp/keiba/pc" target="_blank" rel="noopener">SPAT4公式サイトを開く</a></div></div>{draft}''')
+</div><div class="grid home-metrics"><div class="card metric"><small>💰 本日の上限</small><strong>{DAILY_LIMIT:,}円</strong></div><div class="card metric"><small>🪙 使用額</small><strong>{s['bet']:,}円</strong></div><div class="card metric"><small>👛 残り予算</small><strong>{s['remaining']:,}円</strong></div><div class="card metric"><small>📊 本日の収支</small><strong>{s['profit']:+,}円</strong></div><a class="card metric validation-metric" href="/validation"><small>✓ 予想検証</small><strong>自動採点</strong><span>NAR公式結果で確認</span></a></div><div class="card"><div class="title">単勝100円＋複勝200円・1頭勝負</div><div class="actions"><a class="btn green" href="/analyze">オッズ取得 → 本命1頭予想</a><a class="btn gold" href="/picks">今日の本命を見る</a></div></div>{draft}''')
 
 @app.route("/analyze",methods=["GET","POST"])
 def analyze():
