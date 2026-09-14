@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.5.2 - タイム差取得修正版
+地方競馬 単勝＋複勝投票管理 v3.5.3 - 印刷用出馬表タイム差取得版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -447,7 +447,81 @@ def _extract_margin_final3f(block):
 
     return rows
 
+
+def nar_get_margin_final3f_small(course_name, race_no, horses=None):
+    """NAR公式の印刷用出馬表(DebaTableSmall)から過去走のタイム差＋上がり3Fを取得。"""
+    try:
+        page_text=nar_fetch(nar_url("DebaTableSmall",course_name,race_no),timeout=15)
+    except Exception:
+        return {}
+    plain=re.sub(r"(?is)<script.*?</script>"," ",page_text)
+    plain=re.sub(r"(?is)<style.*?</style>"," ",plain)
+    plain=re.sub(r"(?is)<br\s*/?>"," ",plain)
+    plain=re.sub(r"(?is)<[^>]+>"," ",plain)
+    plain=html.unescape(plain).replace("\xa0"," ")
+    plain=" ".join(plain.split())
+
+    # 印刷用出馬表の実データ例:
+    # 1399（2.6） 9-9-9-9 41.5
+    # 1499（2.0） 10-11-12-12 36.0
+    race_pat=re.compile(
+        r"(?<!\d)(?:\d{3,4}|\d{1,2}:\d{2}\.\d)\s*[（(]\s*([+-]?\d+(?:\.\d+)?)\s*[）)]"
+        r"\s*(\d{1,2}(?:-\d{1,2}){1,3})\s+(\d{2}\.\d)(?!\d)"
+    )
+    result={}
+    horse_list=list(horses or [])
+    for h in horse_list:
+        name=str(h.get("horse_name") or "").strip()
+        horse_no=int(h.get("horse_no") or 0)
+        if not name or horse_no<=0:
+            continue
+        # 馬名が過去走の勝ち馬名にも現れ得るため、全出現位置を調べ、
+        # 馬名直後に成績表らしい情報が続く本体位置を優先する。
+        occ=[m.start() for m in re.finditer(re.escape(name),plain)]
+        if not occ:
+            continue
+        scored=[]
+        for pos in occ:
+            look=plain[pos:pos+900]
+            score=0
+            if re.search(r"\d+\s*-\s*\d+\s*-\s*\d+\s*-\s*\d+",look): score+=3
+            if re.search(r"(?:全|左|右|場|距)\s*\d+",look): score+=2
+            if re.search(r"(?:牡|牝|セ)\s*\d+",look[:180]): score+=1
+            scored.append((score,pos))
+        pos=max(scored,key=lambda x:(x[0],-x[1]))[1]
+
+        # 次の出走馬本体位置までをこの馬のブロックとする。
+        next_positions=[]
+        for other in horse_list:
+            oname=str(other.get("horse_name") or "").strip()
+            if not oname or oname==name: continue
+            for m in re.finditer(re.escape(oname),plain):
+                p=m.start()
+                if p<=pos: continue
+                look=plain[p:p+900]
+                s=0
+                if re.search(r"\d+\s*-\s*\d+\s*-\s*\d+\s*-\s*\d+",look): s+=3
+                if re.search(r"(?:全|左|右|場|距)\s*\d+",look): s+=2
+                if s>=3: next_positions.append(p)
+        end=min(next_positions) if next_positions else min(len(plain),pos+6500)
+        block=plain[pos:end]
+
+        rows=[]
+        for m in race_pat.finditer(block):
+            try:
+                margin=float(m.group(1)); final3f=float(m.group(3))
+            except Exception:
+                continue
+            if not (0.0 <= margin <= 20.0 and 25.0 <= final3f <= 60.0):
+                continue
+            rows.append({"margin":round(margin,1),"corners":m.group(2),"final3f":round(final3f,1)})
+            if len(rows)>=5: break
+        if rows:
+            result[horse_no]=rows
+    return result
+
 def nar_get_form_data(course_name, race_no, horses=None):
+    small_margin_data=nar_get_margin_final3f_small(course_name,race_no,horses)
     url=nar_url("DebaTable",course_name,race_no)
     req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36","Accept-Language":"ja-JP,ja;q=0.9"})
     with urllib.request.urlopen(req,timeout=15) as res:
@@ -494,7 +568,13 @@ def nar_get_form_data(course_name, race_no, horses=None):
 
         corner_histories=_extract_corner_histories(block)
         running_style=running_style_from_corners(corner_histories)
-        margin_final3f=_extract_margin_final3f(block)
+        # タイム差＋上がり3Fは印刷用出馬表を最優先。
+        # 印刷用で取れない場合だけ、従来の上がり3F取得をフォールバック使用。
+        margin_final3f=small_margin_data.get(horse_no) or _extract_margin_final3f(block)
+        # フォールバック側で誤って馬体重増減などをタイム差として拾わないよう、
+        # 印刷用出馬表由来でない場合はタイム差を未取得扱いにする。
+        if horse_no not in small_margin_data:
+            margin_final3f=[dict(x,margin=None) for x in margin_final3f]
         result[horse_no]={
             "recent_finishes":recent[:5],
             "track":_record_stats(block,"場"),
@@ -1388,7 +1468,7 @@ def analyze():
         '<div class="small">※v3.3では脚質・展開は確認表示のみで、予想点にはまだ反映していません。</div>'
         '</div>'
     )
-    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績を補正に使用しています。タイム差・上がり3Fはv3.5.2では取得確認のみで、まだ予想点には反映していません。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
+    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績を補正に使用しています。タイム差・上がり3Fはv3.5.3ではNAR公式の印刷用出馬表から取得確認中で、まだ予想点には反映していません。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
 
 @app.post("/apply")
 def apply():
