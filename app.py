@@ -785,7 +785,7 @@ body{
   border:4px solid #fff;
   margin:2px 0 14px;
   background:
-    linear-gradient(180deg,rgba(73,195,255,.95) 0 43%,rgba(199,242,255,.95) 43% 55%,rgba(110,204,94,.95) 55% 70%,rgba(32,139,68,.96) 70% 100%);
+    linear-gradient(180deg,#86d9ff 0 43%,#d9f5ff 43% 55%,#8fdb7c 55% 70%,#3d9b5b 70% 100%);
   box-shadow:
     0 8px 0 rgba(16,99,69,.18),
     0 16px 34px rgba(21,72,120,.22),
@@ -824,8 +824,9 @@ body{
   width:min(88%,880px);
   height:255px;
   object-fit:contain;
-  background:transparent;
-  mix-blend-mode:multiply;
+  background:rgba(255,255,255,.96);
+  border-radius:22px;
+  mix-blend-mode:normal;
   filter:
     drop-shadow(0 7px 0 rgba(255,255,255,.95))
     drop-shadow(0 14px 18px rgba(62,35,0,.28));
@@ -994,8 +995,9 @@ button:hover,.btn:hover{transform:translateY(-1px)}
   width:230px;
   height:150px;
   object-fit:contain;
-  background:transparent;
-  mix-blend-mode:multiply;
+  background:#fff;
+  border-radius:18px;
+  mix-blend-mode:normal;
   filter:drop-shadow(0 7px 10px rgba(72,45,0,.18));
 }
 .mascot-msg{
