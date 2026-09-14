@@ -762,12 +762,288 @@ CSS="""
 .quick strong{display:block;font-size:18px;margin-bottom:4px}
 @media(max-width:760px){.batch-grid,.quick-grid,.validation-grid{grid-template-columns:1fr}.course-head{flex-direction:column;align-items:stretch}}
 .brand-banner{position:relative;overflow:hidden;border-radius:18px;margin:4px 0 10px;background:linear-gradient(180deg,#dff4ff,#fff);border:1px solid #b9ddf4;box-shadow:0 4px 14px #17202d12;text-align:center}.brand-banner img{display:block;width:100%;height:235px;object-fit:contain;background:#fff}.brand-sub{padding:8px 12px;font-weight:900;color:#245b38;background:linear-gradient(90deg,#ecfff2,#f4fbff,#fff0f6);font-size:15px}.head.compact{margin:0 0 10px}.mascot-card{display:grid;grid-template-columns:180px 1fr;gap:14px;align-items:center;background:linear-gradient(135deg,#f4fff7,#fff5fa);border:1px solid #cde8d6;border-radius:16px;padding:12px;margin-bottom:10px}.mascot-card img{width:180px;height:120px;object-fit:cover;object-position:50% 6%;border-radius:13px}.mascot-msg{font-size:18px;font-weight:900;line-height:1.6}.mascot-msg span{color:#e52f78}.brand-login{max-width:420px;margin:0 auto 14px}.brand-login img{width:100%;max-height:260px;object-fit:contain;border-radius:16px;background:#fff}@media(max-width:760px){.brand-banner img{height:155px}.brand-sub{font-size:13px}.head.compact h1{font-size:18px}.mascot-card{grid-template-columns:105px 1fr}.mascot-card img{width:105px;height:92px}.mascot-msg{font-size:15px}}
+
+/* ===== v3.3.2 カラフル強化デザイン ===== */
+body{
+  background:
+    radial-gradient(circle at 8% 8%,rgba(255,220,80,.25),transparent 23%),
+    radial-gradient(circle at 92% 12%,rgba(255,84,160,.16),transparent 26%),
+    radial-gradient(circle at 50% 100%,rgba(49,183,255,.18),transparent 34%),
+    linear-gradient(180deg,#eaf8ff 0%,#f8fbff 34%,#fff8fb 70%,#f8fff4 100%);
+  min-height:100vh;
+}
+.wrap{max-width:1120px;padding:14px 16px 22px}
+
+.brand-banner{
+  min-height:300px;
+  display:flex;
+  align-items:center;
+  justify-content:center;
+  position:relative;
+  overflow:hidden;
+  border-radius:26px;
+  border:4px solid #fff;
+  margin:2px 0 14px;
+  background:
+    linear-gradient(180deg,rgba(73,195,255,.95) 0 43%,rgba(199,242,255,.95) 43% 55%,rgba(110,204,94,.95) 55% 70%,rgba(32,139,68,.96) 70% 100%);
+  box-shadow:
+    0 8px 0 rgba(16,99,69,.18),
+    0 16px 34px rgba(21,72,120,.22),
+    inset 0 0 0 2px rgba(255,255,255,.55);
+}
+.brand-banner:before{
+  content:"🍀  ✨  🏇  ✨  🍀";
+  position:absolute;
+  top:13px;
+  left:0;
+  right:0;
+  font-size:25px;
+  letter-spacing:28px;
+  color:#fff;
+  text-shadow:0 2px 3px rgba(0,0,0,.15);
+  opacity:.9;
+  pointer-events:none;
+}
+.brand-banner:after{
+  content:"";
+  position:absolute;
+  left:-6%;
+  right:-6%;
+  bottom:46px;
+  height:48px;
+  border-top:8px solid rgba(255,255,255,.95);
+  border-bottom:7px solid rgba(255,240,210,.96);
+  background:linear-gradient(180deg,#3ca361,#16713c);
+  transform:skewY(-2deg);
+  box-shadow:0 -5px 0 rgba(255,255,255,.48);
+  pointer-events:none;
+}
+.brand-banner img{
+  position:relative;
+  z-index:2;
+  width:min(88%,880px);
+  height:255px;
+  object-fit:contain;
+  background:transparent;
+  mix-blend-mode:multiply;
+  filter:
+    drop-shadow(0 7px 0 rgba(255,255,255,.95))
+    drop-shadow(0 14px 18px rgba(62,35,0,.28));
+  transform:translateY(-4px) scale(1.03);
+}
+.brand-sub{
+  position:absolute;
+  z-index:3;
+  left:50%;
+  bottom:12px;
+  transform:translateX(-50%);
+  width:min(92%,820px);
+  padding:10px 22px;
+  border-radius:999px;
+  color:#fff;
+  font-size:17px;
+  font-weight:950;
+  letter-spacing:.03em;
+  background:linear-gradient(90deg,#117947,#20a65d,#1478c8,#ec4d9a);
+  border:2px solid rgba(255,255,255,.95);
+  box-shadow:0 5px 16px rgba(21,72,120,.25);
+  text-shadow:0 2px 2px rgba(0,0,0,.22);
+}
+
+.head.compact{
+  background:linear-gradient(90deg,#fff7d5,#fff,#ffeef7);
+  border:2px solid #ffd45c;
+  padding:10px 14px;
+  border-radius:16px;
+  box-shadow:0 5px 15px rgba(197,126,0,.12);
+}
+.head.compact h1{font-size:24px}
+.badge{
+  background:linear-gradient(135deg,#ffce36,#ff8a2d);
+  color:#4d2800;
+  border:2px solid #fff;
+  box-shadow:0 3px 9px rgba(184,104,0,.22);
+}
+
+.nav{
+  padding:8px;
+  border-radius:16px;
+  background:rgba(255,255,255,.72);
+  border:1px solid rgba(160,194,224,.65);
+  box-shadow:0 5px 16px rgba(44,80,120,.09);
+}
+.nav .btn{
+  border:1px solid rgba(255,255,255,.92);
+  box-shadow:0 3px 8px rgba(35,80,120,.10);
+}
+.nav .btn:nth-child(1){background:linear-gradient(135deg,#1887ff,#0068db);color:#fff}
+.nav .btn:nth-child(2){background:linear-gradient(135deg,#8b6cff,#6849dc);color:#fff}
+.nav .btn:nth-child(3){background:linear-gradient(135deg,#ffb125,#f18b00);color:#fff}
+.nav .btn:nth-child(4){background:linear-gradient(135deg,#29a882,#17835f);color:#fff}
+.nav .btn:nth-child(5){background:linear-gradient(135deg,#32a6dd,#1572aa);color:#fff}
+.nav .btn:nth-child(6){background:linear-gradient(135deg,#ef63a7,#d63883);color:#fff}
+.nav .btn:nth-child(7){background:linear-gradient(135deg,#39b75b,#1f8c3e);color:#fff}
+.nav .btn:nth-child(8){background:linear-gradient(135deg,#202d43,#0b1424);color:#fff}
+
+.card,.horse-card,.course-block,.batch-card{
+  border:1px solid rgba(166,192,219,.8);
+  box-shadow:0 6px 20px rgba(38,76,110,.10);
+}
+.card{border-radius:18px}
+.card>.title:first-child{
+  position:relative;
+  padding-left:13px;
+}
+.card>.title:first-child:before{
+  content:"";
+  position:absolute;
+  left:0;
+  top:2px;
+  bottom:2px;
+  width:5px;
+  border-radius:5px;
+  background:linear-gradient(#ff4f8e,#ffb52c,#2ca9ff);
+}
+
+.hero{
+  position:relative;
+  overflow:hidden;
+  background:
+    linear-gradient(135deg,#fff3a8 0%,#fff 28%,#ffe7f3 60%,#def5ff 100%);
+  border:2px solid #ffd35b;
+  box-shadow:0 7px 20px rgba(218,147,17,.14);
+}
+.hero:after{
+  content:"🏇  🍀";
+  position:absolute;
+  right:18px;
+  top:10px;
+  font-size:36px;
+  opacity:.20;
+}
+.hero .title{font-size:22px;color:#5b2f00}
+
+.quick{
+  min-height:104px;
+  display:flex;
+  flex-direction:column;
+  justify-content:center;
+  transition:.15s ease;
+  box-shadow:0 5px 15px rgba(44,80,120,.09);
+}
+.quick:hover{transform:translateY(-2px)}
+.quick:nth-child(1){background:linear-gradient(135deg,#e9fff0,#fff);border:2px solid #75ce8a}
+.quick:nth-child(2){background:linear-gradient(135deg,#fff2d7,#fff);border:2px solid #ffbd50}
+.quick:nth-child(3){background:linear-gradient(135deg,#f7e9ff,#fff);border:2px solid #c691ea}
+
+.grid>.metric:nth-child(1){border-top:5px solid #ffb000;background:linear-gradient(180deg,#fff8df,#fff)}
+.grid>.metric:nth-child(2){border-top:5px solid #3a9cff;background:linear-gradient(180deg,#ecf6ff,#fff)}
+.grid>.metric:nth-child(3){border-top:5px solid #2fb763;background:linear-gradient(180deg,#edfff2,#fff)}
+.grid>.metric:nth-child(4){border-top:5px solid #ec4f91;background:linear-gradient(180deg,#fff0f7,#fff)}
+.metric strong{font-size:24px}
+
+.grade{
+  color:#e52f78;
+  text-shadow:0 3px 0 #fff,0 5px 9px rgba(196,39,104,.18);
+}
+.pick-grid>div,.stats-grid>div{
+  border:1px solid rgba(186,204,220,.6);
+  box-shadow:inset 0 1px 0 #fff;
+}
+.pick-grid>div:nth-child(4n+1){background:linear-gradient(180deg,#eef8ff,#fff)}
+.pick-grid>div:nth-child(4n+2){background:linear-gradient(180deg,#f1fff4,#fff)}
+.pick-grid>div:nth-child(4n+3){background:linear-gradient(180deg,#fff7e7,#fff)}
+.pick-grid>div:nth-child(4n){background:linear-gradient(180deg,#fff0f6,#fff)}
+
+button,.btn{
+  transition:transform .12s ease,box-shadow .12s ease;
+}
+button:hover,.btn:hover{transform:translateY(-1px)}
+.green{background:linear-gradient(135deg,#24aa62,#137d45);box-shadow:0 4px 10px rgba(22,131,79,.20)}
+.gold{background:linear-gradient(135deg,#ffb52d,#db7b00);box-shadow:0 4px 10px rgba(190,112,0,.20)}
+.red{background:linear-gradient(135deg,#e64f47,#aa1d18)}
+
+.closing-hero{
+  background:linear-gradient(135deg,#eaffef,#fff6cf,#eaf6ff);
+  border:2px solid #48b86b;
+  box-shadow:0 6px 18px rgba(26,139,77,.14);
+}
+
+.mascot-card{
+  position:relative;
+  grid-template-columns:230px 1fr;
+  overflow:hidden;
+  background:
+    radial-gradient(circle at 10% 20%,rgba(255,220,61,.42),transparent 22%),
+    radial-gradient(circle at 90% 12%,rgba(255,79,155,.22),transparent 28%),
+    linear-gradient(135deg,#eaffef,#fff9d9 45%,#ffeaf5 72%,#e6f7ff);
+  border:3px solid #ffd54d;
+  border-radius:22px;
+  box-shadow:0 8px 22px rgba(90,70,0,.13);
+  padding:16px;
+}
+.mascot-card:after{
+  content:"🍀 ✨ 🍀 ✨ 🍀";
+  position:absolute;
+  right:14px;
+  bottom:8px;
+  font-size:24px;
+  opacity:.28;
+}
+.mascot-card img{
+  width:230px;
+  height:150px;
+  object-fit:contain;
+  background:transparent;
+  mix-blend-mode:multiply;
+  filter:drop-shadow(0 7px 10px rgba(72,45,0,.18));
+}
+.mascot-msg{
+  font-size:22px;
+  text-align:center;
+  color:#442b16;
+}
+.mascot-msg span{
+  color:#e52f78;
+  text-shadow:0 1px 0 #fff;
+}
+
+.note{
+  background:linear-gradient(135deg,#fff9e7,#fff);
+  border-color:#f0cf80;
+}
+.ok{
+  background:linear-gradient(135deg,#e8fff0,#fff);
+  border-color:#95d6ac;
+}
+.member-status{
+  border:1px solid #b9d8f3;
+  box-shadow:0 3px 10px rgba(42,101,158,.08);
+}
+
+@media(max-width:760px){
+  .wrap{padding:8px}
+  .brand-banner{min-height:208px;border-radius:18px;margin-bottom:10px}
+  .brand-banner:before{font-size:17px;letter-spacing:10px;top:7px}
+  .brand-banner:after{bottom:39px;height:34px;border-top-width:5px;border-bottom-width:5px}
+  .brand-banner img{height:170px;width:96%;transform:translateY(-3px) scale(1.05)}
+  .brand-sub{bottom:8px;font-size:12px;padding:7px 10px;width:95%}
+  .head.compact{padding:9px 10px}
+  .head.compact h1{font-size:18px}
+  .nav{gap:6px;padding:6px}
+  .nav .btn{min-height:48px;font-size:13px}
+  .hero .title{font-size:19px}
+  .mascot-card{grid-template-columns:110px 1fr;padding:11px}
+  .mascot-card img{width:110px;height:95px}
+  .mascot-msg{font-size:15px;text-align:left}
+  .metric strong{font-size:20px}
+}
 """
 
 
 def page(body,title=APP_TITLE):
     member=(f'<div class="member-status">会員ログイン中：{html.escape(str(session.get("member_id","")))}　<a href="/logout">ログアウト</a></div>' if LOGIN_ENABLED and session.get("member_authenticated") else ('<div class="member-status setup">販売前：会員ログイン未設定</div>' if not LOGIN_ENABLED else ''))
-    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="パカおとパカ美のワクワク競馬"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="brand-banner"><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美のワクワク競馬"><div class="brand-sub">競馬をもっと身近に、もっと楽しく！　単勝＋複勝 1頭勝負</div></div><div class="head compact"><h1>{APP_TITLE}</h1><span class="badge">単勝＋複勝</span></div><div class="nav"><a class="btn secondary" href="/">ホーム</a><a class="btn secondary" href="/analyze">1頭勝負予想</a><a class="btn secondary" href="/picks">今日の本命</a><a class="btn secondary" href="/history">成績履歴</a><a class="btn secondary" href="/analytics">成績分析</a><a class="btn secondary" href="/validation">予想検証</a><a class="btn secondary" href="/courses">本日の開催</a><a class="btn green" href="/closing-soon">発走5分前</a></div>{member}{body}<div class="mascot-card"><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美"><div class="mascot-msg">パカおとパカ美と一緒に、<span>データを味方に楽しく予想！</span><br><span>ワクワクするレース</span>を見つけよう♪</div></div><div class="note">このv3は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
+    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="パカおとパカ美のワクワク競馬"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="brand-banner"><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美のワクワク競馬"><div class="brand-sub">🍀 競馬をもっと身近に、もっと楽しく！　単勝＋複勝 1頭勝負 🍀</div></div><div class="head compact"><h1>{APP_TITLE}</h1><span class="badge">単勝＋複勝</span></div><div class="nav"><a class="btn secondary" href="/">ホーム</a><a class="btn secondary" href="/analyze">1頭勝負予想</a><a class="btn secondary" href="/picks">今日の本命</a><a class="btn secondary" href="/history">成績履歴</a><a class="btn secondary" href="/analytics">成績分析</a><a class="btn secondary" href="/validation">予想検証</a><a class="btn secondary" href="/courses">本日の開催</a><a class="btn green" href="/closing-soon">発走5分前</a></div>{member}{body}<div class="mascot-card"><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美"><div class="mascot-msg">✨ パカおとパカ美と一緒に ✨<br><span>データを味方に楽しく予想！</span><br><span>ワクワクするレース</span>を見つけよう♪</div></div><div class="note">このv3は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
 
 
 def login_page(message=""):
