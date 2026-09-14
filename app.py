@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.5.1 - タイム差＋上がり3F取得修正版
+地方競馬 単勝＋複勝投票管理 v3.5.2 - タイム差取得修正版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -353,62 +353,99 @@ def _record_stats(text, label):
 
 def _extract_margin_final3f(block):
     """
-    NAR出馬表の過去走から「1着馬とのタイム差」と「上がり3F」を確認用に取得。
-    NARには 1399（2.6） と 1:39.9（2.6） の両方の表記があるため両対応。
-    1着時の括弧内はNAR表記上「2着馬との差」。
+    NAR出馬表の過去走から「タイム差」と「上がり3F」を確認用に取得。
+    NAR出馬表ではタイム差が、走破タイムの直後ではなく
+    「1着馬名または2着馬名 (差)」の位置に出る場合があるため、
+    上がり3F/通過順とタイム差を別々に拾って走順で結合する。
     現段階では予想スコアには反映しない。
     """
     normalized=html.unescape(str(block or "")).replace("\xa0"," ")
     normalized=re.sub(r"\s+"," ",normalized)
-    out=[]
 
-    # 例:
-    # 1399（2.6） 9-9-9-9 41.5
-    # 1:39.9（2.6） 9-9-9-9 41.5
-    # 1:39.9 (2.6) 9-9-9-9 41.5
-    time_token=r"(?:\d{3,4}|\d{1,2}:\d{2}\.\d)"
-    pattern=(
-        rf"(?<!\d){time_token}\s*[（(]\s*([+-]?\d+(?:\.\d+)?)\s*[）)]"
-        r"\s*(\d{1,2}(?:-\d{1,2}){1,3})\s+(\d{2}\.\d)(?!\d)"
-    )
-    for m in re.finditer(pattern, normalized):
+    rows=[]
+
+    # 現在のNAR出馬表で取得できている並びを優先:
+    # 通過順 + 上がり3F
+    for m in re.finditer(
+        r"(?<!\d)(\d{1,2}(?:-\d{1,2}){1,3})\s+(\d{2}\.\d)(?!\d)",
+        normalized
+    ):
         try:
-            margin=float(m.group(1))
-            final3f=float(m.group(3))
+            final3f=float(m.group(2))
         except Exception:
             continue
-        if not (0.0 <= abs(margin) <= 20.0 and 25.0 <= final3f <= 60.0):
+        if not (25.0 <= final3f <= 60.0):
             continue
-        out.append({
-            "margin":round(margin,1),
-            "corners":m.group(2),
+        rows.append({
+            "margin":None,
+            "corners":m.group(1),
             "final3f":round(final3f,1),
         })
-        if len(out)>=5:
+        if len(rows)>=5:
             break
 
-    # 念のため、タイム差が取れなくても「通過順 + 上がり3F」は取得する。
-    # これによりNAR側の一部表記差でも上がり3Fだけは確認できる。
-    if not out:
-        fallback=re.finditer(
-            r"(?<!\d)(\d{1,2}(?:-\d{1,2}){1,3})\s+(\d{2}\.\d)(?!\d)",
+    # 表示順が逆（上がり3F + 通過順）のページにも対応
+    if not rows:
+        for m in re.finditer(
+            r"(?<!\d)(\d{2}\.\d)\s+(\d{1,2}(?:-\d{1,2}){1,3})(?!\d)",
             normalized
-        )
-        for m in fallback:
+        ):
             try:
-                final3f=float(m.group(2))
+                final3f=float(m.group(1))
             except Exception:
                 continue
             if not (25.0 <= final3f <= 60.0):
                 continue
-            out.append({
+            rows.append({
                 "margin":None,
-                "corners":m.group(1),
+                "corners":m.group(2),
                 "final3f":round(final3f,1),
             })
-            if len(out)>=5:
+            if len(rows)>=5:
                 break
-    return out
+
+    # NAR出馬表の「1着馬または(2着馬)」欄にある (2.6) のような差を抽出。
+    # 騎手所属など文字だけの括弧は対象外。
+    margins=[]
+    for m in re.finditer(r"[（(]\s*([+-]?\d+(?:\.\d+)?)\s*[）)]", normalized):
+        try:
+            v=float(m.group(1))
+        except Exception:
+            continue
+        if 0.0 <= abs(v) <= 20.0:
+            margins.append(round(v,1))
+        if len(margins)>=5:
+            break
+
+    # 過去走はどちらも新しい順なので、順番で結合する。
+    for i,row in enumerate(rows):
+        if i < len(margins):
+            row["margin"]=margins[i]
+
+    # 念のため旧形式
+    # 1:39.9（2.6） 9-9-9 41.5
+    if not rows:
+        time_token=r"(?:\d{3,4}|\d{1,2}:\d{2}\.\d)"
+        pattern=(
+            rf"(?<!\d){time_token}\s*[（(]\s*([+-]?\d+(?:\.\d+)?)\s*[）)]"
+            r"\s*(\d{1,2}(?:-\d{1,2}){1,3})\s+(\d{2}\.\d)(?!\d)"
+        )
+        for m in re.finditer(pattern, normalized):
+            try:
+                margin=float(m.group(1))
+                final3f=float(m.group(3))
+            except Exception:
+                continue
+            if 0.0 <= abs(margin) <= 20.0 and 25.0 <= final3f <= 60.0:
+                rows.append({
+                    "margin":round(margin,1),
+                    "corners":m.group(2),
+                    "final3f":round(final3f,1),
+                })
+            if len(rows)>=5:
+                break
+
+    return rows
 
 def nar_get_form_data(course_name, race_no, horses=None):
     url=nar_url("DebaTable",course_name,race_no)
@@ -1351,7 +1388,7 @@ def analyze():
         '<div class="small">※v3.3では脚質・展開は確認表示のみで、予想点にはまだ反映していません。</div>'
         '</div>'
     )
-    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績を補正に使用しています。タイム差・上がり3Fはv3.5.1では取得確認のみで、まだ予想点には反映していません。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
+    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績を補正に使用しています。タイム差・上がり3Fはv3.5.2では取得確認のみで、まだ予想点には反映していません。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
 
 @app.post("/apply")
 def apply():
