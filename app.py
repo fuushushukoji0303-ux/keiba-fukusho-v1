@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.6 - 印刷用出馬表タイム差取得版
+地方競馬 単勝＋複勝投票管理 v3.7 - 馬体重・増減取得確認版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -322,6 +322,39 @@ def save_validation_prediction(course, race, result, remaining):
         ))
 
 
+def _body_weight_from_odds_row(row):
+    """NAR単勝・複勝オッズ表の行から当日馬体重と増減を取得（v3.7確認表示用）。"""
+    cells=[" ".join(str(x or "").replace("\xa0"," ").split()) for x in (row or [])]
+    # 馬名・オッズより後ろだけを見ることで、他の3桁数値の誤取得を避ける。
+    for cell in cells[5:]:
+        t=cell.replace("＋","+").replace("−","-").replace("－","-")
+        if "計不" in t:
+            return None, None
+        # 例: 496(-8), 496 (-8), 496（+12）
+        m=re.search(r"(?<!\d)([2-7]\d{2})\s*[（(]\s*([+-]?\d{1,3})\s*[）)]",t)
+        if m:
+            w=int(m.group(1)); ch=int(m.group(2))
+            if 200<=w<=799 and -100<=ch<=100:
+                return w,ch
+        # 表示崩れで括弧が落ちた場合: 496 -8 / 496 +12
+        m=re.fullmatch(r"\s*([2-7]\d{2})\s+([+-]\d{1,3})\s*",t)
+        if m:
+            w=int(m.group(1)); ch=int(m.group(2))
+            if 200<=w<=799 and -100<=ch<=100:
+                return w,ch
+    return None,None
+
+
+def body_weight_display(horse):
+    w=(horse or {}).get("body_weight")
+    ch=(horse or {}).get("body_weight_change")
+    if w is None:
+        return "取得なし"
+    if ch is None:
+        return f"{int(w)}kg（増減 取得なし）"
+    return f"{int(w)}kg（{int(ch):+d}kg）"
+
+
 def nar_get_horses(course, race):
     text = nar_fetch(nar_url("OddsTanFuku", course, race))
     p=SimpleTableParser(); p.feed(text); horses=[]
@@ -335,7 +368,8 @@ def nar_get_horses(course, race):
         if not win_nums or not place_nums: continue
         win=to_float(win_nums[0],0); low=to_float(place_nums[0],0); high=to_float(place_nums[1] if len(place_nums)>=2 else place_nums[0],0)
         if win<=0 or low<=0: continue
-        horses.append({"horse_no":int(no),"horse_name":name,"win_odds":win,"place_low":low,"place_high":max(low,high)})
+        body_weight,body_weight_change=_body_weight_from_odds_row(row)
+        horses.append({"horse_no":int(no),"horse_name":name,"win_odds":win,"place_low":low,"place_high":max(low,high),"body_weight":body_weight,"body_weight_change":body_weight_change})
     horses.sort(key=lambda x:x["win_odds"])
     for i,h in enumerate(horses,1): h["market_rank"]=i
     return horses
@@ -1021,7 +1055,7 @@ def evaluate(horses, remaining, form_data=None):
     corner_text=corner_history_text(best.get("form_data"))
     style_text=running_style_text(best.get("form_data"))
     margin_text,final3f_text=margin_final3f_display(best.get("form_data"))
-    reasons=[f"候補評価：{best['confidence']}点",f"従来優先度：{best['base_priority_score']:.1f}",f"実績評価：{best['form_rating']:.1f}点（補正 {best['form_adjust']:+.1f}）",f"近5走：{recent_text}",f"過去走 タイム差：{margin_text}",f"過去走 上がり3F：{final3f_text}",f"タイム差補正（テスト）：{best.get('margin_adjust',0):+.1f}",f"上がり3F補正（テスト）：{best.get('final3f_adjust',0):+.1f}",f"タイム差＋上がり3F補正：{best.get('margin3f_adjust',0):+.1f}",f"競馬場成績 3着内率：{track_text}",f"距離成績 3着内率：{distance_text}",f"騎手：{jockey_name}",f"騎手勝率：{jockey_win}",f"騎手連対率：{jockey_quinella}",f"騎手評価：{best['jockey_rating']:.1f}点（補正 {best['jockey_adjust']:+.1f}）",f"過去走 通過順：{corner_text}",f"脚質判定：{style_text}",f"補正後優先度：{best['priority_score']:.1f}",f"単勝オッズ：{best['win_odds']:.1f}倍",f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",f"参考EV：{best['ev_index']:.2f}",f"単勝人気順位：{best['market_rank']}位",f"2～3着時の下限損益目安：{place_only_low:+,}円",f"1着時の下限損益目安：{first_low:+,}円"]
+    reasons=[f"候補評価：{best['confidence']}点",f"従来優先度：{best['base_priority_score']:.1f}",f"実績評価：{best['form_rating']:.1f}点（補正 {best['form_adjust']:+.1f}）",f"近5走：{recent_text}",f"過去走 タイム差：{margin_text}",f"過去走 上がり3F：{final3f_text}",f"タイム差補正（テスト）：{best.get('margin_adjust',0):+.1f}",f"上がり3F補正（テスト）：{best.get('final3f_adjust',0):+.1f}",f"タイム差＋上がり3F補正：{best.get('margin3f_adjust',0):+.1f}",f"競馬場成績 3着内率：{track_text}",f"距離成績 3着内率：{distance_text}",f"騎手：{jockey_name}",f"騎手勝率：{jockey_win}",f"騎手連対率：{jockey_quinella}",f"騎手評価：{best['jockey_rating']:.1f}点（補正 {best['jockey_adjust']:+.1f}）",f"過去走 通過順：{corner_text}",f"脚質判定：{style_text}",f"補正後優先度：{best['priority_score']:.1f}",f"当日馬体重（確認用・スコア未反映）：{body_weight_display(best)}",f"単勝オッズ：{best['win_odds']:.1f}倍",f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",f"参考EV：{best['ev_index']:.2f}",f"単勝人気順位：{best['market_rank']}位",f"2～3着時の下限損益目安：{place_only_low:+,}円",f"1着時の下限損益目安：{first_low:+,}円"]
     return {"grade":grade,"score":score,"recs":[best],"reasons":reasons}
 
 
@@ -1529,7 +1563,7 @@ def home():
         draft=f'''<div class="card"><div class="title">現在の本命1頭</div><div class="horse-card"><div class="horse-no">{d.get('horse_no','')}番</div><div class="horse-name">{html.escape(str(d.get('horse_name','')))}</div><div class="pick-grid"><div><span>複勝オッズ</span><strong>{float(d.get('place_low') or 0):.1f}～{float(d.get('place_high') or 0):.1f}倍</strong></div><div><span>判定</span><strong>{html.escape(str(d.get('grade','')))}</strong></div><div><span>参考EV</span><strong>{float(d.get('ev_index') or 0):.2f}</strong></div><div><span>買い方</span><strong>単勝100円＋複勝200円</strong></div></div></div><form method="post" action="/record"><button class="green">この1頭を購入記録へ</button></form></div>'''
     return page(f'''{msg_html}
 <div class="hero"><div class="title">単勝100円＋複勝200円・1頭勝負</div>
-<div>市場オッズ・実績・騎手評価・脚質・ペースに加え、過去走のタイム差と上がり3Fを確認できる第四段階です。</div></div>
+<div>市場オッズ・実績・騎手評価・脚質・ペース・タイム差・上がり3Fに加え、v3.7では当日の馬体重と増減を確認表示します。馬体重はまだ予想点に反映しません。</div></div>
 <div class="quick-grid">
 <a class="quick" href="/courses"><strong>🏇 本日の開催</strong><span>競馬場ごとに全レース一括予想</span></a>
 <a class="quick" href="/closing-soon"><strong>⏱ 発走5分前</strong><span>発走が近いレースだけ抽出</span></a>
@@ -1556,7 +1590,7 @@ def analyze():
     reasons=''.join(f'<li>{html.escape(x)}</li>' for x in result["reasons"])
     cards=''
     for i,x in enumerate(recs,1):
-        cards+=f'''<div class="horse-card"><div><strong>{i}位候補</strong></div><div class="horse-no">{x['horse_no']}番</div><div class="horse-name">{html.escape(x['horse_name'])}</div><div class="pick-grid"><div><span>単勝</span><strong>{x['win_odds']:.1f}倍</strong></div><div><span>複勝</span><strong>{x['place_low']:.1f}～{x['place_high']:.1f}倍</strong></div><div><span>候補評価</span><strong>{x['confidence']}点</strong></div><div><span>優先度</span><strong>{x['priority_score']:.1f}</strong></div><div><span>参考EV</span><strong>{x['ev_index']:.2f}</strong><span>{x['ev_label']}</span></div><div><span>実績評価</span><strong>{x.get('form_rating',50):.1f}点</strong></div><div><span>騎手評価</span><strong>{x.get('jockey_rating',50):.1f}点</strong></div><div><span>従来優先度</span><strong>{x.get('base_priority_score',x['priority_score']):.1f}</strong></div></div></div>'''
+        cards+=f'''<div class="horse-card"><div><strong>{i}位候補</strong></div><div class="horse-no">{x['horse_no']}番</div><div class="horse-name">{html.escape(x['horse_name'])}</div><div class="pick-grid"><div><span>単勝</span><strong>{x['win_odds']:.1f}倍</strong></div><div><span>馬体重（確認用）</span><strong>{html.escape(body_weight_display(x))}</strong></div><div><span>複勝</span><strong>{x['place_low']:.1f}～{x['place_high']:.1f}倍</strong></div><div><span>候補評価</span><strong>{x['confidence']}点</strong></div><div><span>優先度</span><strong>{x['priority_score']:.1f}</strong></div><div><span>参考EV</span><strong>{x['ev_index']:.2f}</strong><span>{x['ev_label']}</span></div><div><span>実績評価</span><strong>{x.get('form_rating',50):.1f}点</strong></div><div><span>騎手評価</span><strong>{x.get('jockey_rating',50):.1f}点</strong></div><div><span>従来優先度</span><strong>{x.get('base_priority_score',x['priority_score']):.1f}</strong></div></div></div>'''
     button=''
     if recs:
         b=recs[0]; amount=recommended_amount(result["grade"],summary()["remaining"],b["place_low"])
@@ -1575,7 +1609,7 @@ def analyze():
         '<div class="small">※v3.3では脚質・展開は確認表示のみで、予想点にはまだ反映していません。</div>'
         '</div>'
     )
-    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績を補正に使用しています。タイム差・上がり3Fはv3.5.3ではNAR公式の印刷用出馬表から取得確認中で、まだ予想点には反映していません。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
+    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績に加え、v3.6のタイム差・上がり3Fテスト補正を使用しています。v3.7の馬体重・増減は取得確認のための表示のみで、予想点には反映していません。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
 
 @app.post("/apply")
 def apply():
@@ -1859,45 +1893,6 @@ def validation():
     ret = sum(int(r["return_amount"] or 0) for r in settled)
     roi = ret / bet * 100 if bet else 0
 
-    # v3.6.1: 検証画面だけを強化。保存済みの検証結果からランク別に集計する。
-    # official_result に「単勝」「複勝」が含まれるかで券種別的中も確認する。
-    grade_order = ("S", "A", "B", "見送り")
-    grade_rows = []
-    for grade in grade_order:
-        gs = [r for r in settled if str(r["grade"]) == grade]
-        gn = len(gs)
-        gh = sum(1 for r in gs if r["result"] == "的中")
-        win_hits = sum(1 for r in gs if "単勝" in str(r["official_result"] or ""))
-        place_hits = sum(1 for r in gs if "複勝" in str(r["official_result"] or ""))
-        gbet = sum(int(r["amount"] or 0) for r in gs)
-        gret = sum(int(r["return_amount"] or 0) for r in gs)
-        groi = (gret / gbet * 100) if gbet else None
-        grade_rows.append({
-            "grade": grade, "n": gn, "hits": gh,
-            "hit_rate": (gh / gn * 100) if gn else 0.0,
-            "win_hits": win_hits, "win_rate": (win_hits / gn * 100) if gn else 0.0,
-            "place_hits": place_hits, "place_rate": (place_hits / gn * 100) if gn else 0.0,
-            "bet": gbet, "ret": gret, "roi": groi, "profit": gret-gbet,
-        })
-
-    rank_detail = ''
-    for g in grade_rows:
-        roi_text = f'{g["roi"]:.1f}%' if g["roi"] is not None else '－'
-        rank_detail += (
-            '<div class="horse-card">'
-            f'<div class="horse-name">ランク {html.escape(g["grade"])}</div>'
-            '<div class="pick-grid">'
-            f'<div><span>確定数</span><strong>{g["n"]}</strong></div>'
-            f'<div><span>的中率</span><strong>{g["hit_rate"]:.1f}%</strong><small>{g["hits"]}/{g["n"]}</small></div>'
-            f'<div><span>単勝的中率</span><strong>{g["win_rate"]:.1f}%</strong><small>{g["win_hits"]}/{g["n"]}</small></div>'
-            f'<div><span>複勝的中率</span><strong>{g["place_rate"]:.1f}%</strong><small>{g["place_hits"]}/{g["n"]}</small></div>'
-            f'<div><span>購入額</span><strong>{g["bet"]:,}円</strong></div>'
-            f'<div><span>払戻</span><strong>{g["ret"]:,}円</strong></div>'
-            f'<div><span>回収率</span><strong>{roi_text}</strong></div>'
-            f'<div><span>収支</span><strong>{g["profit"]:+,}円</strong></div>'
-            '</div></div>'
-        )
-
     cards = ""
     for r in rows:
         cards += (
@@ -1915,7 +1910,7 @@ def validation():
         )
 
     body = (
-        '<div class="card"><div class="title">予想検証ダッシュボード v3.6.1</div>'
+        '<div class="card"><div class="title">予想検証ダッシュボード</div>'
         '<form method="post" action="/validation/auto-results"><button class="green">NAR公式から未確定結果を自動取得</button></form>'
         '<div class="validation-grid" style="margin-top:10px">'
         f'<div>記録数<br><strong>{len(rows)}</strong></div>'
@@ -1925,9 +1920,6 @@ def validation():
         '</div>'
         f'<div class="ok">検証収支 {ret-bet:+,}円 ／ 購入額 {bet:,}円 ／ 払戻 {ret:,}円</div>'
         '</div>'
-        '<div class="card"><div class="title">ランク別 詳細検証</div>'
-        '<div class="small" style="margin-bottom:10px">S・A・B・見送りごとに、確定数・的中率・単勝/複勝的中率・購入額・払戻・回収率・収支を集計します。購入額0円のランクは回収率を「－」表示します。</div>'
-        + rank_detail + '</div>'
         + cards
     )
     return page(body)
