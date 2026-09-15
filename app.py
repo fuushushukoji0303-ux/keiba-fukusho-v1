@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.8 - 枠番・馬番取得確認版
+地方競馬 単勝＋複勝投票管理 v3.8.1 - 競馬場×距離×枠位置 条件取得確認版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -381,6 +381,42 @@ def nar_get_horses(course, race):
     horses.sort(key=lambda x:x["win_odds"])
     for i,h in enumerate(horses,1): h["market_rank"]=i
     return horses
+
+
+def nar_get_race_condition(course_name, race_no):
+    """v3.8.1確認用。NAR公式出馬表から当該レースの馬場種別・距離・回りを取得する。スコアには使わない。"""
+    try:
+        text = nar_fetch(nar_url("DebaTable", course_name, race_no), timeout=12)
+    except Exception:
+        return {"surface": None, "distance": None, "direction": None}
+    plain = html.unescape(re.sub(r"<[^>]+>", " ", text))
+    plain = re.sub(r"\s+", " ", plain)
+    m = re.search(r"(ダート|芝)\s*([0-9,]{3,5})\s*[ｍmM]", plain)
+    surface = m.group(1) if m else None
+    distance = int(m.group(2).replace(",", "")) if m else None
+    direction = None
+    if m:
+        tail = plain[m.end():m.end()+40]
+        md = re.search(r"[（(]\s*(右|左|直線)\s*[）)]", tail)
+        if md:
+            direction = md.group(1)
+    return {"surface": surface, "distance": distance, "direction": direction}
+
+
+def gate_condition_display(course_name, race_condition, horse, horses=None):
+    """競馬場×距離×馬番位置の比較条件キーを作る。v3.8.1では表示のみ。"""
+    race_condition = race_condition or {}
+    surface = race_condition.get("surface")
+    distance = race_condition.get("distance")
+    direction = race_condition.get("direction")
+    _, _, field_size, zone = gate_position_display(horse, horses)
+    race_text = "取得なし"
+    if surface and distance:
+        race_text = f"{surface}{int(distance)}m" + (f"（{direction}）" if direction else "")
+    key_text = "取得なし"
+    if course_name and distance and zone != "取得なし":
+        key_text = f"{course_name} × {int(distance)}m × {zone}"
+    return race_text, key_text, field_size, zone
 
 
 def gate_position_display(horse, horses=None):
@@ -1738,12 +1774,18 @@ def analyze():
     try: horses=nar_get_horses(course,race)
     except Exception as e: return page(form+f'<div class="bad">取得エラー：{html.escape(type(e).__name__)} - {html.escape(str(e))}</div>')
     if not horses: return page(form+'<div class="note">単勝・複勝オッズを取得できませんでした。発売前・締切後・更新中の可能性があります。</div>')
+    # v3.8.1 確認用: 競馬場×距離×馬番位置の条件を取得。予想点には反映しない。
+    race_condition = nar_get_race_condition(course, race)
     try:
         form_data=nar_get_form_data(course,race,horses)
         attach_jockey_stats(form_data)
     except Exception:
         form_data={}
     remaining=summary()["remaining"]; result=evaluate(horses,remaining,form_data); pace_now=predict_race_pace(form_data); save_pick(course,race,result); save_validation_prediction(course,race,result,remaining); recs=result["recs"]
+    if recs:
+        race_text, gate_key, _, _ = gate_condition_display(course, race_condition, recs[0], horses)
+        result["reasons"].append(f"レース条件（確認用・スコア未反映）：{race_text}")
+        result["reasons"].append(f"枠傾向の比較条件（確認用・スコア未反映）：{gate_key}")
     reasons=''.join(f'<li>{html.escape(x)}</li>' for x in result["reasons"])
     cards=''
     for i,x in enumerate(recs,1):
@@ -1766,7 +1808,7 @@ def analyze():
         '<div class="small">※v3.3では脚質・展開は確認表示のみで、予想点にはまだ反映していません。</div>'
         '</div>'
     )
-    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績に加え、v3.6のタイム差・上がり3Fテスト補正を使用しています。v3.7.2の馬体重補正は、その馬自身の過去体重中央値・変動幅との比較だけを使い、最大±1.0点のテスト補正として反映しています。v3.8の枠番・馬番・出走頭数・馬番位置は取得確認用で、スコアにはまだ反映していません。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
+    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績に加え、v3.6のタイム差・上がり3Fテスト補正を使用しています。v3.7.2の馬体重補正は、その馬自身の過去体重中央値・変動幅との比較だけを使い、最大±1.0点のテスト補正として反映しています。v3.8.1の枠番・馬番・出走頭数・レース距離・「競馬場×距離×馬番位置」の比較条件は取得確認用で、スコアにはまだ反映していません。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
 
 @app.post("/apply")
 def apply():
