@@ -1859,6 +1859,45 @@ def validation():
     ret = sum(int(r["return_amount"] or 0) for r in settled)
     roi = ret / bet * 100 if bet else 0
 
+    # v3.6.1: 検証画面だけを強化。保存済みの検証結果からランク別に集計する。
+    # official_result に「単勝」「複勝」が含まれるかで券種別的中も確認する。
+    grade_order = ("S", "A", "B", "見送り")
+    grade_rows = []
+    for grade in grade_order:
+        gs = [r for r in settled if str(r["grade"]) == grade]
+        gn = len(gs)
+        gh = sum(1 for r in gs if r["result"] == "的中")
+        win_hits = sum(1 for r in gs if "単勝" in str(r["official_result"] or ""))
+        place_hits = sum(1 for r in gs if "複勝" in str(r["official_result"] or ""))
+        gbet = sum(int(r["amount"] or 0) for r in gs)
+        gret = sum(int(r["return_amount"] or 0) for r in gs)
+        groi = (gret / gbet * 100) if gbet else None
+        grade_rows.append({
+            "grade": grade, "n": gn, "hits": gh,
+            "hit_rate": (gh / gn * 100) if gn else 0.0,
+            "win_hits": win_hits, "win_rate": (win_hits / gn * 100) if gn else 0.0,
+            "place_hits": place_hits, "place_rate": (place_hits / gn * 100) if gn else 0.0,
+            "bet": gbet, "ret": gret, "roi": groi, "profit": gret-gbet,
+        })
+
+    rank_detail = ''
+    for g in grade_rows:
+        roi_text = f'{g["roi"]:.1f}%' if g["roi"] is not None else '－'
+        rank_detail += (
+            '<div class="horse-card">'
+            f'<div class="horse-name">ランク {html.escape(g["grade"])}</div>'
+            '<div class="pick-grid">'
+            f'<div><span>確定数</span><strong>{g["n"]}</strong></div>'
+            f'<div><span>的中率</span><strong>{g["hit_rate"]:.1f}%</strong><small>{g["hits"]}/{g["n"]}</small></div>'
+            f'<div><span>単勝的中率</span><strong>{g["win_rate"]:.1f}%</strong><small>{g["win_hits"]}/{g["n"]}</small></div>'
+            f'<div><span>複勝的中率</span><strong>{g["place_rate"]:.1f}%</strong><small>{g["place_hits"]}/{g["n"]}</small></div>'
+            f'<div><span>購入額</span><strong>{g["bet"]:,}円</strong></div>'
+            f'<div><span>払戻</span><strong>{g["ret"]:,}円</strong></div>'
+            f'<div><span>回収率</span><strong>{roi_text}</strong></div>'
+            f'<div><span>収支</span><strong>{g["profit"]:+,}円</strong></div>'
+            '</div></div>'
+        )
+
     cards = ""
     for r in rows:
         cards += (
@@ -1876,7 +1915,7 @@ def validation():
         )
 
     body = (
-        '<div class="card"><div class="title">予想検証ダッシュボード</div>'
+        '<div class="card"><div class="title">予想検証ダッシュボード v3.6.1</div>'
         '<form method="post" action="/validation/auto-results"><button class="green">NAR公式から未確定結果を自動取得</button></form>'
         '<div class="validation-grid" style="margin-top:10px">'
         f'<div>記録数<br><strong>{len(rows)}</strong></div>'
@@ -1886,6 +1925,9 @@ def validation():
         '</div>'
         f'<div class="ok">検証収支 {ret-bet:+,}円 ／ 購入額 {bet:,}円 ／ 払戻 {ret:,}円</div>'
         '</div>'
+        '<div class="card"><div class="title">ランク別 詳細検証</div>'
+        '<div class="small" style="margin-bottom:10px">S・A・B・見送りごとに、確定数・的中率・単勝/複勝的中率・購入額・払戻・回収率・収支を集計します。購入額0円のランクは回収率を「－」表示します。</div>'
+        + rank_detail + '</div>'
         + cards
     )
     return page(body)
