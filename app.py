@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.8.1 - 競馬場×距離×枠位置 条件取得確認版
+地方競馬 単勝＋複勝投票管理 v3.8.2 - 枠傾向データ収集・確認版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -109,6 +109,16 @@ def init_db():
             official_result TEXT DEFAULT '',
             checked_at TEXT DEFAULT '',
             result_source TEXT DEFAULT '',
+            UNIQUE(race_date, course, race)
+        );
+        CREATE TABLE IF NOT EXISTS gate_trend_races(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            race_date TEXT NOT NULL, course TEXT NOT NULL, race INTEGER NOT NULL,
+            surface TEXT, distance INTEGER NOT NULL,
+            inner_starters INTEGER NOT NULL DEFAULT 0, inner_top3 INTEGER NOT NULL DEFAULT 0,
+            middle_starters INTEGER NOT NULL DEFAULT 0, middle_top3 INTEGER NOT NULL DEFAULT 0,
+            outer_starters INTEGER NOT NULL DEFAULT 0, outer_top3 INTEGER NOT NULL DEFAULT 0,
+            collected_at TEXT NOT NULL,
             UNIQUE(race_date, course, race)
         );
         """)
@@ -438,6 +448,206 @@ def gate_position_display(horse, horses=None):
             zone="外寄り"
     return frame_text,horse_text,field_size,zone
 
+
+
+
+def nar_url_for_date(page_name, course_name, race_no, race_date):
+    """NAR公式の指定日ページURL。v3.8.2の過去枠傾向確認用。"""
+    q = urllib.parse.urlencode({
+        "k_babaCode": NAR_COURSE_CODES[course_name],
+        "k_raceDate": str(race_date).replace("-", "/"),
+        "k_raceNo": int(race_no),
+    })
+    return f"{NAR_BASE_URL}/{page_name}?{q}"
+
+
+def nar_race_numbers_for_date(course_name, race_date):
+    """指定日のNAR公式レース一覧からレース番号を取得。"""
+    q = urllib.parse.urlencode({
+        "k_babaCode": NAR_COURSE_CODES[course_name],
+        "k_raceDate": str(race_date).replace("-", "/"),
+    })
+    try:
+        text = nar_fetch(f"{NAR_BASE_URL}/RaceList?{q}", timeout=8)
+    except Exception:
+        return []
+    nums = {int(x) for x in re.findall(r"k_raceNo=(\d+)", text) if 1 <= int(x) <= 12}
+    return sorted(nums)
+
+
+def _zone_from_horse_no(horse_no, field_size):
+    if not horse_no or not field_size or field_size < 2:
+        return None
+    ratio = float(horse_no) / float(field_size)
+    if ratio <= 1/3:
+        return "内寄り"
+    if ratio <= 2/3:
+        return "中ほど"
+    return "外寄り"
+
+
+def parse_gate_trend_race(page_text, target_distance):
+    """RaceMarkTableから同距離レースの内・中・外別出走数/3着内数を抽出。"""
+    if not page_text:
+        return None
+    plain = html.unescape(re.sub(r"<[^>]+>", " ", page_text))
+    plain = re.sub(r"\s+", " ", plain)
+    m = re.search(r"(ダート|芝)\s*([0-9,]{3,5})\s*[ｍmM]", plain)
+    if not m:
+        return None
+    surface = m.group(1)
+    distance = int(m.group(2).replace(",", ""))
+    if int(distance) != int(target_distance):
+        return None
+
+    p = SimpleTableParser(); p.feed(page_text)
+    runners = []
+    for row in p.rows:
+        cells = [" ".join(str(x or "").replace("\xa0", " ").split()) for x in row]
+        if len(cells) < 8:
+            continue
+        finish = to_int(cells[0], 0)
+        frame = to_int(cells[1], 0)
+        horse_no = to_int(cells[2], 0)
+        if not (1 <= finish <= 30 and 1 <= frame <= 8 and 1 <= horse_no <= 18):
+            continue
+        runners.append((finish, horse_no))
+    # 同じ結果表を別テーブルから重複取得した場合に備え、馬番ごとに最初の行だけ残す。
+    unique = {}
+    for finish, horse_no in runners:
+        if horse_no not in unique:
+            unique[horse_no] = finish
+    if len(unique) < 3:
+        return None
+    field_size = max(unique.keys())
+    counts = {
+        "内寄り": {"starters": 0, "top3": 0},
+        "中ほど": {"starters": 0, "top3": 0},
+        "外寄り": {"starters": 0, "top3": 0},
+    }
+    for horse_no, finish in unique.items():
+        zone = _zone_from_horse_no(horse_no, field_size)
+        if zone:
+            counts[zone]["starters"] += 1
+            if finish <= 3:
+                counts[zone]["top3"] += 1
+    return {"surface": surface, "distance": distance, "counts": counts}
+
+
+def _save_gate_trend_race(race_date, course, race_no, parsed):
+    c = parsed["counts"]
+    with db() as con:
+        con.execute("""
+        INSERT INTO gate_trend_races(
+            race_date,course,race,surface,distance,
+            inner_starters,inner_top3,middle_starters,middle_top3,outer_starters,outer_top3,collected_at
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(race_date,course,race) DO UPDATE SET
+            surface=excluded.surface,distance=excluded.distance,
+            inner_starters=excluded.inner_starters,inner_top3=excluded.inner_top3,
+            middle_starters=excluded.middle_starters,middle_top3=excluded.middle_top3,
+            outer_starters=excluded.outer_starters,outer_top3=excluded.outer_top3,
+            collected_at=excluded.collected_at
+        """, (
+            race_date, course, int(race_no), parsed["surface"], int(parsed["distance"]),
+            c["内寄り"]["starters"], c["内寄り"]["top3"],
+            c["中ほど"]["starters"], c["中ほど"]["top3"],
+            c["外寄り"]["starters"], c["外寄り"]["top3"],
+            now().strftime("%Y-%m-%d %H:%M:%S"),
+        ))
+
+
+def gate_trend_summary(course_name, distance):
+    with db() as con:
+        rows = con.execute("""
+            SELECT * FROM gate_trend_races
+            WHERE course=? AND distance=?
+            ORDER BY race_date DESC, race DESC
+            LIMIT 80
+        """, (course_name, int(distance))).fetchall()
+    out = {
+        "race_count": len(rows),
+        "内寄り": {"starters": 0, "top3": 0},
+        "中ほど": {"starters": 0, "top3": 0},
+        "外寄り": {"starters": 0, "top3": 0},
+    }
+    for r in rows:
+        out["内寄り"]["starters"] += int(r["inner_starters"])
+        out["内寄り"]["top3"] += int(r["inner_top3"])
+        out["中ほど"]["starters"] += int(r["middle_starters"])
+        out["中ほど"]["top3"] += int(r["middle_top3"])
+        out["外寄り"]["starters"] += int(r["outer_starters"])
+        out["外寄り"]["top3"] += int(r["outer_top3"])
+    return out
+
+
+def collect_gate_trend_data(course_name, distance, lookback_days=14, max_result_pages=30):
+    """直近のNAR公式競走成績を収集。v3.8.2では確認表示のみでスコア未反映。"""
+    # まず直近14日分の開催日/レース番号を並列で確認する。
+    dates = [(now().date() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(1, lookback_days + 1)]
+    day_races = []
+    with ThreadPoolExecutor(max_workers=min(7, len(dates))) as pool:
+        fmap = {pool.submit(nar_race_numbers_for_date, course_name, d): d for d in dates}
+        for f in as_completed(fmap):
+            d = fmap[f]
+            try:
+                nums = f.result()
+            except Exception:
+                nums = []
+            if nums:
+                day_races.append((d, nums))
+    day_races.sort(reverse=True)
+    tasks = []
+    for d, nums in day_races:
+        for r in sorted(nums, reverse=True):
+            tasks.append((d, r))
+            if len(tasks) >= max_result_pages:
+                break
+        if len(tasks) >= max_result_pages:
+            break
+
+    # 既にDBにあるレースは再取得せず、未取得分だけ公式競走成績を確認する。
+    missing = []
+    with db() as con:
+        for d, r in tasks:
+            old = con.execute("SELECT distance FROM gate_trend_races WHERE race_date=? AND course=? AND race=?", (d, course_name, int(r))).fetchone()
+            if old is None:
+                missing.append((d, r))
+    if missing:
+        with ThreadPoolExecutor(max_workers=min(6, len(missing))) as pool:
+            fmap = {
+                pool.submit(nar_fetch, nar_url_for_date("RaceMarkTable", course_name, r, d), 10): (d, r)
+                for d, r in missing
+            }
+            for f in as_completed(fmap):
+                d, r = fmap[f]
+                try:
+                    text = f.result()
+                    parsed = parse_gate_trend_race(text, distance)
+                    if parsed:
+                        _save_gate_trend_race(d, course_name, r, parsed)
+                except Exception:
+                    pass
+    return gate_trend_summary(course_name, distance)
+
+
+def gate_trend_reason_lines(course_name, distance, current_zone, summary_data):
+    lines = []
+    races = int((summary_data or {}).get("race_count", 0))
+    lines.append(f"枠傾向データ（確認用・スコア未反映）：{course_name} × {int(distance)}m ／ 同距離 {races}レース")
+    for zone in ("内寄り", "中ほど", "外寄り"):
+        d = (summary_data or {}).get(zone, {})
+        starters = int(d.get("starters", 0))
+        top3 = int(d.get("top3", 0))
+        rate = (top3 / starters * 100.0) if starters else None
+        rate_text = f"{rate:.1f}%（{top3}/{starters}）" if rate is not None else "取得なし"
+        mark = " ← 今回" if zone == current_zone else ""
+        lines.append(f"枠傾向 {zone} 3着内率：{rate_text}{mark}")
+    if races < 5:
+        lines.append("枠傾向サンプル判定：データ不足（5レース未満のため評価には使用しません）")
+    else:
+        lines.append("枠傾向サンプル判定：確認可能（v3.8.2ではまだ評価点に使用しません）")
+    return lines
 
 def _record_stats(text, label):
     normalized=str(text).replace("\xa0"," ")
@@ -1756,7 +1966,7 @@ def home():
         draft=f'''<div class="card"><div class="title">現在の本命1頭</div><div class="horse-card"><div class="horse-no">{d.get('horse_no','')}番</div><div class="horse-name">{html.escape(str(d.get('horse_name','')))}</div><div class="pick-grid"><div><span>複勝オッズ</span><strong>{float(d.get('place_low') or 0):.1f}～{float(d.get('place_high') or 0):.1f}倍</strong></div><div><span>判定</span><strong>{html.escape(str(d.get('grade','')))}</strong></div><div><span>参考EV</span><strong>{float(d.get('ev_index') or 0):.2f}</strong></div><div><span>買い方</span><strong>単勝100円＋複勝200円</strong></div></div></div><form method="post" action="/record"><button class="green">この1頭を購入記録へ</button></form></div>'''
     return page(f'''{msg_html}
 <div class="hero"><div class="title">単勝100円＋複勝200円・1頭勝負</div>
-<div>市場オッズ・実績・騎手評価・脚質・ペース・タイム差・上がり3Fに加え、v3.7.2の馬体重補正を維持し、v3.8では枠番・馬番・出走頭数・相対位置を確認表示します。枠順情報はまだ予想点に反映しません。</div></div>
+<div>市場オッズ・実績・騎手評価・脚質・ペース・タイム差・上がり3Fに加え、v3.7.2の馬体重補正を維持し、v3.8.2ではNAR公式の直近競走成績から、競馬場×距離ごとの内寄り・中ほど・外寄りの3着内率を収集して確認表示します。枠傾向はまだ予想点に反映しません。</div></div>
 <div class="quick-grid">
 <a class="quick" href="/courses"><strong>🏇 本日の開催</strong><span>競馬場ごとに全レース一括予想</span></a>
 <a class="quick" href="/closing-soon"><strong>⏱ 発走5分前</strong><span>発走が近いレースだけ抽出</span></a>
@@ -1774,7 +1984,7 @@ def analyze():
     try: horses=nar_get_horses(course,race)
     except Exception as e: return page(form+f'<div class="bad">取得エラー：{html.escape(type(e).__name__)} - {html.escape(str(e))}</div>')
     if not horses: return page(form+'<div class="note">単勝・複勝オッズを取得できませんでした。発売前・締切後・更新中の可能性があります。</div>')
-    # v3.8.1 確認用: 競馬場×距離×馬番位置の条件を取得。予想点には反映しない。
+    # v3.8.2 確認用: 競馬場×距離×馬番位置と直近の枠傾向を取得。予想点には反映しない。
     race_condition = nar_get_race_condition(course, race)
     try:
         form_data=nar_get_form_data(course,race,horses)
@@ -1783,9 +1993,16 @@ def analyze():
         form_data={}
     remaining=summary()["remaining"]; result=evaluate(horses,remaining,form_data); pace_now=predict_race_pace(form_data); save_pick(course,race,result); save_validation_prediction(course,race,result,remaining); recs=result["recs"]
     if recs:
-        race_text, gate_key, _, _ = gate_condition_display(course, race_condition, recs[0], horses)
+        race_text, gate_key, _, current_zone = gate_condition_display(course, race_condition, recs[0], horses)
         result["reasons"].append(f"レース条件（確認用・スコア未反映）：{race_text}")
         result["reasons"].append(f"枠傾向の比較条件（確認用・スコア未反映）：{gate_key}")
+        distance_now = race_condition.get("distance")
+        if distance_now:
+            try:
+                gate_stats = collect_gate_trend_data(course, int(distance_now))
+                result["reasons"].extend(gate_trend_reason_lines(course, int(distance_now), current_zone, gate_stats))
+            except Exception:
+                result["reasons"].append("枠傾向データ（確認用・スコア未反映）：取得できませんでした")
     reasons=''.join(f'<li>{html.escape(x)}</li>' for x in result["reasons"])
     cards=''
     for i,x in enumerate(recs,1):
