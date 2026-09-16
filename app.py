@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.9 - 過去レース検証版
+地方競馬 単勝＋複勝投票管理 v3.9.1 - 過去最終オッズ取得修正版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -394,6 +394,85 @@ def nar_get_horses(course, race, race_date=None, final_odds=False):
         horses.append({"horse_no":int(no),"horse_name":name,"win_odds":win,"place_low":low,"place_high":max(low,high),"body_weight":body_weight,"body_weight_change":body_weight_change,"frame_no":frame_no})
     horses.sort(key=lambda x:x["win_odds"])
     for i,h in enumerate(horses,1): h["market_rank"]=i
+    return horses
+
+
+def nar_get_horses_backtest_final(course, race, race_date):
+    """v3.9.1 過去検証専用: NAR最終単勝・複勝オッズ表を読む。
+
+    最終オッズ表示では先頭に「人気」列が追加される場合があるため、
+    ライブ用 nar_get_horses() とは分離して列ずれを防ぐ。
+    """
+    odds_url = nar_url("OddsTanFuku", course, race, race_date) + "&odds_flg=5"
+    text = nar_fetch(odds_url)
+    p = SimpleTableParser(); p.feed(text)
+    horses = []
+
+    def _num_cell(v, max_digits=2):
+        t = str(v or "").replace(" ", "")
+        return bool(re.fullmatch(rf"\d{{1,{max_digits}}}", t))
+
+    for row in p.rows:
+        if len(row) < 5:
+            continue
+        cells = [" ".join(str(x or "").replace("\xa0", " ").split()) for x in row]
+
+        # 通常: 枠,馬番,馬名,単勝,複勝下限,複勝上限,...
+        # 最終人気順: 人気,枠,馬番,馬名,単勝,複勝下限,複勝上限,...
+        offset = 0
+        if len(cells) >= 7 and _num_cell(cells[0]) and _num_cell(cells[1]) and _num_cell(cells[2]):
+            # 3列目まで数字で4列目が馬名なら、先頭は人気列と判断。
+            if not re.fullmatch(r"\d+(?:\.\d+)?", cells[3].replace(",", "")):
+                offset = 1
+
+        frame_i, no_i, name_i, win_i, place_i = offset, offset+1, offset+2, offset+3, offset+4
+        if place_i >= len(cells):
+            continue
+
+        frame_txt = cells[frame_i].replace(" ", "")
+        no_txt = cells[no_i].replace(" ", "")
+        if not re.fullmatch(r"[1-8]", frame_txt) or not re.fullmatch(r"\d{1,2}", no_txt):
+            continue
+        name = cells[name_i].strip()
+        if not name or "馬名" in name:
+            continue
+
+        win_nums = re.findall(r"\d+(?:\.\d+)?", cells[win_i])
+        if not win_nums:
+            continue
+        win = to_float(win_nums[0], 0)
+
+        # NAR HTMLでは複勝下限・上限が別セルになる場合と、同一セルになる場合の両方に対応。
+        place_text = cells[place_i]
+        place_nums = re.findall(r"\d+(?:\.\d+)?", place_text)
+        if len(place_nums) < 2 and place_i + 1 < len(cells):
+            nxt = cells[place_i + 1]
+            # 性齢などを誤って拾わないよう、小数オッズ形式だけを追加。
+            if re.fullmatch(r"\s*\d{1,3}\.\d\s*", nxt):
+                place_nums += re.findall(r"\d+(?:\.\d+)?", nxt)
+        if not place_nums:
+            continue
+        low = to_float(place_nums[0], 0)
+        high = to_float(place_nums[1] if len(place_nums) >= 2 else place_nums[0], 0)
+        if win <= 0 or low <= 0:
+            continue
+
+        # 馬体重は列位置がずれるので、馬名以降のセルを渡して既存ロジックで安全に探索。
+        body_weight, body_weight_change = _body_weight_from_odds_row([""]*5 + cells[name_i+1:])
+        horses.append({
+            "horse_no": int(no_txt),
+            "horse_name": name,
+            "win_odds": win,
+            "place_low": low,
+            "place_high": max(low, high),
+            "body_weight": body_weight,
+            "body_weight_change": body_weight_change,
+            "frame_no": int(frame_txt),
+        })
+
+    horses.sort(key=lambda x: x["win_odds"])
+    for i, h in enumerate(horses, 1):
+        h["market_rank"] = i
     return horses
 
 
@@ -2482,7 +2561,7 @@ def backtest():
     opts=''.join(f'<option value="{html.escape(c)}" {"selected" if c==course else ""}>{html.escape(c)}</option>' for c in NAR_COURSE_CODES)
     ropts=''.join(f'<option value="{n}" {"selected" if n==race else ""}>{n}R</option>' for n in range(1,13))
     form=(
-        '<div class="card"><div class="title">過去レース検証 v3.9</div>'
+        '<div class="card"><div class="title">過去レース検証 v3.9.1</div>'
         '<div class="note">対象日のNAR公式「最終オッズ」と、そのレース時点の出馬表を使うバックテストです。結果・払戻は予想計算後に照合します。</div>'
         '<form method="post"><div class="two">'
         f'<div><label>日付</label><input type="date" name="race_date" value="{html.escape(race_date)}" max="{today()}"></div>'
@@ -2501,7 +2580,7 @@ def backtest():
     if course not in NAR_COURSE_CODES or not 1<=race<=12:
         return page(form+'<div class="bad">競馬場とレースを選んでください。</div>')
     try:
-        horses=nar_get_horses(course,race,race_date,final_odds=True)
+        horses=nar_get_horses_backtest_final(course,race,race_date)
     except Exception as e:
         return page(form+f'<div class="bad">過去オッズ取得エラー：{html.escape(type(e).__name__)} - {html.escape(str(e))}</div>')
     if not horses:
