@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.8.2 - 枠傾向データ収集・確認版
+地方競馬 単勝＋複勝投票管理 v3.8.3 - 枠傾向補正テスト版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -452,7 +452,7 @@ def gate_position_display(horse, horses=None):
 
 
 def nar_url_for_date(page_name, course_name, race_no, race_date):
-    """NAR公式の指定日ページURL。v3.8.2の過去枠傾向確認用。"""
+    """NAR公式の指定日ページURL。v3.8.3の枠傾向テスト用。"""
     q = urllib.parse.urlencode({
         "k_babaCode": NAR_COURSE_CODES[course_name],
         "k_raceDate": str(race_date).replace("-", "/"),
@@ -582,7 +582,7 @@ def gate_trend_summary(course_name, distance):
 
 
 def collect_gate_trend_data(course_name, distance, lookback_days=14, max_result_pages=30):
-    """直近のNAR公式競走成績を収集。v3.8.2では確認表示のみでスコア未反映。"""
+    """直近のNAR公式競走成績を収集。v3.8.3では少量の枠傾向補正に使用。"""
     # まず直近14日分の開催日/レース番号を並列で確認する。
     dates = [(now().date() - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(1, lookback_days + 1)]
     day_races = []
@@ -634,7 +634,7 @@ def collect_gate_trend_data(course_name, distance, lookback_days=14, max_result_
 def gate_trend_reason_lines(course_name, distance, current_zone, summary_data):
     lines = []
     races = int((summary_data or {}).get("race_count", 0))
-    lines.append(f"枠傾向データ（確認用・スコア未反映）：{course_name} × {int(distance)}m ／ 同距離 {races}レース")
+    lines.append(f"枠傾向データ（テスト・スコア反映）：{course_name} × {int(distance)}m ／ 同距離 {races}レース")
     for zone in ("内寄り", "中ほど", "外寄り"):
         d = (summary_data or {}).get(zone, {})
         starters = int(d.get("starters", 0))
@@ -644,10 +644,89 @@ def gate_trend_reason_lines(course_name, distance, current_zone, summary_data):
         mark = " ← 今回" if zone == current_zone else ""
         lines.append(f"枠傾向 {zone} 3着内率：{rate_text}{mark}")
     if races < 5:
-        lines.append("枠傾向サンプル判定：データ不足（5レース未満のため評価には使用しません）")
+        lines.append("枠傾向サンプル判定：データ不足（5レース未満のため補正0.0）")
+    elif races < 10:
+        lines.append("枠傾向サンプル判定：少なめ（補正上限 ±0.4点）")
+    elif races < 20:
+        lines.append("枠傾向サンプル判定：中程度（補正上限 ±0.7点）")
     else:
-        lines.append("枠傾向サンプル判定：確認可能（v3.8.2ではまだ評価点に使用しません）")
+        lines.append("枠傾向サンプル判定：十分（補正上限 ±1.0点）")
     return lines
+
+
+def gate_trend_test_adjust(horse, horses=None, summary_data=None):
+    """v3.8.3 テスト: 同競馬場・同距離の内/中/外3着内率を最大±1点だけ反映。
+
+    5レース未満、または今回ゾーンの出走数10頭未満なら補正しない。
+    全ゾーン平均3着内率との差を15ポイント=約1点の目安で弱く換算し、
+    サンプルレース数に応じて上限を±0.4/±0.7/±1.0へ制限する。
+    """
+    summary_data = summary_data or {}
+    races = int(summary_data.get("race_count", 0) or 0)
+    _, _, field_size, zone = gate_position_display(horse, horses)
+    result = {
+        "total": 0.0, "zone": zone, "race_count": races,
+        "zone_rate": None, "overall_rate": None, "diff_pp": None,
+        "starters": 0, "status": "取得不足"
+    }
+    if zone not in ("内寄り", "中ほど", "外寄り") or races < 5:
+        result["status"] = "データ不足"
+        return result
+
+    zd = summary_data.get(zone, {}) or {}
+    starters = int(zd.get("starters", 0) or 0)
+    top3 = int(zd.get("top3", 0) or 0)
+    result["starters"] = starters
+    if starters < 10:
+        result["status"] = "出走数不足"
+        return result
+
+    total_starters = 0
+    total_top3 = 0
+    for z in ("内寄り", "中ほど", "外寄り"):
+        d = summary_data.get(z, {}) or {}
+        total_starters += int(d.get("starters", 0) or 0)
+        total_top3 += int(d.get("top3", 0) or 0)
+    if total_starters <= 0:
+        result["status"] = "データ不足"
+        return result
+
+    zone_rate = top3 / starters * 100.0
+    overall_rate = total_top3 / total_starters * 100.0
+    diff_pp = zone_rate - overall_rate
+    if races < 10:
+        cap = 0.4
+        sample_status = "少なめ"
+    elif races < 20:
+        cap = 0.7
+        sample_status = "中程度"
+    else:
+        cap = 1.0
+        sample_status = "十分"
+    adjust = max(-cap, min(cap, diff_pp / 15.0))
+    if abs(adjust) < 0.05:
+        adjust = 0.0
+    adjust = round(adjust, 1)
+    result.update({
+        "total": adjust, "zone_rate": round(zone_rate, 1),
+        "overall_rate": round(overall_rate, 1), "diff_pp": round(diff_pp, 1),
+        "status": f"{sample_status}・{zone}"
+    })
+    return result
+
+
+_GATE_TREND_RUNTIME_CACHE = {}
+
+def gate_trend_stats_cached(course_name, distance):
+    """同一プロセス内では競馬場×距離の収集結果を再利用し、一括予想の負荷を抑える。"""
+    if not course_name or not distance:
+        return {}
+    key = (str(course_name), int(distance), now().strftime("%Y-%m-%d"))
+    if key in _GATE_TREND_RUNTIME_CACHE:
+        return _GATE_TREND_RUNTIME_CACHE[key]
+    data = collect_gate_trend_data(course_name, int(distance))
+    _GATE_TREND_RUNTIME_CACHE[key] = data
+    return data
 
 def _record_stats(text, label):
     normalized=str(text).replace("\xa0"," ")
@@ -1111,7 +1190,7 @@ def margin_final3f_display(form):
 
 
 def past_body_weight_display(form):
-    """v3.7.1確認用。過去走馬体重と、次の古い走との比較で増減を表示。スコア未反映。"""
+    """v3.7.1由来。過去走馬体重と、次の古い走との比較で増減を表示。v3.7.2以降は馬体重補正にも使用。"""
     rows=list((form or {}).get("margin_final3f") or [])[:5]
     if not rows:
         return "取得なし"
@@ -1404,8 +1483,8 @@ def history_calibration():
     return {"n":n,"hit_rate":hits/n if n else None,"roi":ret/bet if bet else None}
 
 
-def score_horses(horses, form_data=None):
-    cal=history_calibration(); out=[]; form_data=form_data or {}
+def score_horses(horses, form_data=None, gate_stats=None):
+    cal=history_calibration(); out=[]; form_data=form_data or {}; gate_stats=gate_stats or {}
     for h in horses:
         low=max(h["place_low"],0.1); high=max(h["place_high"],low); mid=(low+high)/2
         spread=(high-low)/low; rank=h["market_rank"]
@@ -1433,15 +1512,18 @@ def score_horses(horses, form_data=None):
         margin3f_adjust=float(margin3f["total"])
         # v3.7.2テスト: 馬体重はその馬自身の通常帯との比較だけ。最大±1点。
         bodyweight_adjust=float(bodyweight["total"])
-        priority=round(max(0.0,min(100.0,base_priority+form_adjust+jockey_adjust+margin3f_adjust+bodyweight_adjust)),1)
-        x=dict(h); x.update({"mid":mid,"spread":spread,"confidence":confidence,"estimated_hit_pct":round(est_p*100,1),"ev_index":round(ev,2),"priority_score":priority,"base_priority_score":base_priority,"form_rating":form_rating,"form_adjust":round(form_adjust,1),"jockey_rating":jockey_score,"jockey_adjust":round(jockey_adjust,1),"margin3f_adjust":round(margin3f_adjust,1),"margin_adjust":margin3f["margin_adjust"],"final3f_adjust":margin3f["final3f_adjust"],"avg_gap":margin3f["avg_gap"],"final3f_trend":margin3f["final3f_trend"],"bodyweight_adjust":round(bodyweight_adjust,1),"bodyweight_median":bodyweight["median"],"bodyweight_deviation_pct":bodyweight["deviation_pct"],"bodyweight_tolerance_kg":bodyweight["tolerance_kg"],"bodyweight_status":bodyweight["status"],"field_size":len(horses),"form_data":form,"ev_label":"妙味あり" if ev>=1.08 else "中立" if ev>=0.95 else "妙味薄め"})
+        # v3.8.3テスト: 同競馬場・同距離の枠傾向を最大±1点だけ追加。
+        gate_trend=gate_trend_test_adjust(h,horses,gate_stats)
+        gate_trend_adjust=float(gate_trend["total"])
+        priority=round(max(0.0,min(100.0,base_priority+form_adjust+jockey_adjust+margin3f_adjust+bodyweight_adjust+gate_trend_adjust)),1)
+        x=dict(h); x.update({"mid":mid,"spread":spread,"confidence":confidence,"estimated_hit_pct":round(est_p*100,1),"ev_index":round(ev,2),"priority_score":priority,"base_priority_score":base_priority,"form_rating":form_rating,"form_adjust":round(form_adjust,1),"jockey_rating":jockey_score,"jockey_adjust":round(jockey_adjust,1),"margin3f_adjust":round(margin3f_adjust,1),"margin_adjust":margin3f["margin_adjust"],"final3f_adjust":margin3f["final3f_adjust"],"avg_gap":margin3f["avg_gap"],"final3f_trend":margin3f["final3f_trend"],"bodyweight_adjust":round(bodyweight_adjust,1),"bodyweight_median":bodyweight["median"],"bodyweight_deviation_pct":bodyweight["deviation_pct"],"bodyweight_tolerance_kg":bodyweight["tolerance_kg"],"bodyweight_status":bodyweight["status"],"gate_trend_adjust":round(gate_trend_adjust,1),"gate_trend_zone":gate_trend["zone"],"gate_trend_rate":gate_trend["zone_rate"],"gate_trend_overall_rate":gate_trend["overall_rate"],"gate_trend_diff_pp":gate_trend["diff_pp"],"gate_trend_status":gate_trend["status"],"gate_trend_races":gate_trend["race_count"],"gate_trend_starters":gate_trend["starters"],"field_size":len(horses),"form_data":form,"ev_label":"妙味あり" if ev>=1.08 else "中立" if ev>=0.95 else "妙味薄め"})
         out.append(x)
     out.sort(key=lambda x:(x["priority_score"],x["confidence"],x["ev_index"]),reverse=True)
     return out
 
 
-def evaluate(horses, remaining, form_data=None):
-    ranked=score_horses(horses,form_data)
+def evaluate(horses, remaining, form_data=None, gate_stats=None):
+    ranked=score_horses(horses,form_data,gate_stats)
     if not ranked: return {"grade":"見送り","score":0,"recs":[],"reasons":["候補を取得できませんでした。"]}
     best=ranked[0]; score=int(round(best["priority_score"]))
     if remaining<300: grade="見送り"
@@ -1458,7 +1540,7 @@ def evaluate(horses, remaining, form_data=None):
     margin_text,final3f_text=margin_final3f_display(best.get("form_data"))
     frame_text,horse_no_text,field_size,gate_zone=gate_position_display(best,[None]*int(best.get("field_size") or 0))
     field_text=f"{field_size}頭" if field_size else "取得なし"
-    reasons=[f"候補評価：{best['confidence']}点",f"従来優先度：{best['base_priority_score']:.1f}",f"実績評価：{best['form_rating']:.1f}点（補正 {best['form_adjust']:+.1f}）",f"近5走：{recent_text}",f"過去走 タイム差：{margin_text}",f"過去走 上がり3F：{final3f_text}",f"タイム差補正（テスト）：{best.get('margin_adjust',0):+.1f}",f"上がり3F補正（テスト）：{best.get('final3f_adjust',0):+.1f}",f"タイム差＋上がり3F補正：{best.get('margin3f_adjust',0):+.1f}",f"競馬場成績 3着内率：{track_text}",f"距離成績 3着内率：{distance_text}",f"騎手：{jockey_name}",f"騎手勝率：{jockey_win}",f"騎手連対率：{jockey_quinella}",f"騎手評価：{best['jockey_rating']:.1f}点（補正 {best['jockey_adjust']:+.1f}）",f"過去走 通過順：{corner_text}",f"脚質判定：{style_text}",f"馬体重：{body_weight_display(best)}",f"過去走 馬体重：{past_body_weight_display(best.get('form_data'))}",f"馬体重判定（テスト）：{best.get('bodyweight_status','取得不足')}（補正 {best.get('bodyweight_adjust',0):+.1f}）",f"過去体重中央値：{best.get('bodyweight_median') if best.get('bodyweight_median') is not None else '取得なし'}kg",f"枠番（確認用・スコア未反映）：{frame_text}",f"馬番（確認用・スコア未反映）：{horse_no_text}",f"出走頭数（確認用）：{field_text}",f"馬番位置（確認用・スコア未反映）：{gate_zone}",f"補正後優先度：{best['priority_score']:.1f}",f"単勝オッズ：{best['win_odds']:.1f}倍",f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",f"参考EV：{best['ev_index']:.2f}",f"単勝人気順位：{best['market_rank']}位",f"2～3着時の下限損益目安：{place_only_low:+,}円",f"1着時の下限損益目安：{first_low:+,}円"]
+    reasons=[f"候補評価：{best['confidence']}点",f"従来優先度：{best['base_priority_score']:.1f}",f"実績評価：{best['form_rating']:.1f}点（補正 {best['form_adjust']:+.1f}）",f"近5走：{recent_text}",f"過去走 タイム差：{margin_text}",f"過去走 上がり3F：{final3f_text}",f"タイム差補正（テスト）：{best.get('margin_adjust',0):+.1f}",f"上がり3F補正（テスト）：{best.get('final3f_adjust',0):+.1f}",f"タイム差＋上がり3F補正：{best.get('margin3f_adjust',0):+.1f}",f"競馬場成績 3着内率：{track_text}",f"距離成績 3着内率：{distance_text}",f"騎手：{jockey_name}",f"騎手勝率：{jockey_win}",f"騎手連対率：{jockey_quinella}",f"騎手評価：{best['jockey_rating']:.1f}点（補正 {best['jockey_adjust']:+.1f}）",f"過去走 通過順：{corner_text}",f"脚質判定：{style_text}",f"馬体重：{body_weight_display(best)}",f"過去走 馬体重：{past_body_weight_display(best.get('form_data'))}",f"馬体重判定（テスト）：{best.get('bodyweight_status','取得不足')}（補正 {best.get('bodyweight_adjust',0):+.1f}）",f"過去体重中央値：{best.get('bodyweight_median') if best.get('bodyweight_median') is not None else '取得なし'}kg",f"枠番（確認用）：{frame_text}",f"馬番（確認用）：{horse_no_text}",f"出走頭数（確認用）：{field_text}",f"馬番位置（枠傾向テスト）：{gate_zone}",f"枠傾向補正（テスト）：{best.get('gate_trend_adjust',0):+.1f}（{best.get('gate_trend_status','取得不足')}）",f"補正後優先度：{best['priority_score']:.1f}",f"単勝オッズ：{best['win_odds']:.1f}倍",f"複勝オッズ：{best['place_low']:.1f}～{best['place_high']:.1f}倍",f"参考EV：{best['ev_index']:.2f}",f"単勝人気順位：{best['market_rank']}位",f"2～3着時の下限損益目安：{place_only_low:+,}円",f"1着時の下限損益目安：{first_low:+,}円"]
     return {"grade":grade,"score":score,"recs":[best],"reasons":reasons}
 
 
@@ -1966,7 +2048,7 @@ def home():
         draft=f'''<div class="card"><div class="title">現在の本命1頭</div><div class="horse-card"><div class="horse-no">{d.get('horse_no','')}番</div><div class="horse-name">{html.escape(str(d.get('horse_name','')))}</div><div class="pick-grid"><div><span>複勝オッズ</span><strong>{float(d.get('place_low') or 0):.1f}～{float(d.get('place_high') or 0):.1f}倍</strong></div><div><span>判定</span><strong>{html.escape(str(d.get('grade','')))}</strong></div><div><span>参考EV</span><strong>{float(d.get('ev_index') or 0):.2f}</strong></div><div><span>買い方</span><strong>単勝100円＋複勝200円</strong></div></div></div><form method="post" action="/record"><button class="green">この1頭を購入記録へ</button></form></div>'''
     return page(f'''{msg_html}
 <div class="hero"><div class="title">単勝100円＋複勝200円・1頭勝負</div>
-<div>市場オッズ・実績・騎手評価・脚質・ペース・タイム差・上がり3Fに加え、v3.7.2の馬体重補正を維持し、v3.8.2ではNAR公式の直近競走成績から、競馬場×距離ごとの内寄り・中ほど・外寄りの3着内率を収集して確認表示します。枠傾向はまだ予想点に反映しません。</div></div>
+<div>市場オッズ・実績・騎手評価・脚質・ペース・タイム差・上がり3F・馬体重補正を維持し、v3.8.3ではNAR公式の直近競走成績から集計した競馬場×距離ごとの枠傾向を、最大±1.0点のテスト補正として弱く反映します。5レース未満は補正しません。</div></div>
 <div class="quick-grid">
 <a class="quick" href="/courses"><strong>🏇 本日の開催</strong><span>競馬場ごとに全レース一括予想</span></a>
 <a class="quick" href="/closing-soon"><strong>⏱ 発走5分前</strong><span>発走が近いレースだけ抽出</span></a>
@@ -1984,25 +2066,30 @@ def analyze():
     try: horses=nar_get_horses(course,race)
     except Exception as e: return page(form+f'<div class="bad">取得エラー：{html.escape(type(e).__name__)} - {html.escape(str(e))}</div>')
     if not horses: return page(form+'<div class="note">単勝・複勝オッズを取得できませんでした。発売前・締切後・更新中の可能性があります。</div>')
-    # v3.8.2 確認用: 競馬場×距離×馬番位置と直近の枠傾向を取得。予想点には反映しない。
+    # v3.8.3 テスト: 競馬場×距離×馬番位置の直近枠傾向を、最大±1点だけ予想点へ反映。
     race_condition = nar_get_race_condition(course, race)
+    distance_now = race_condition.get("distance")
+    gate_stats = {}
+    if distance_now:
+        try:
+            gate_stats = gate_trend_stats_cached(course, int(distance_now))
+        except Exception:
+            gate_stats = {}
     try:
         form_data=nar_get_form_data(course,race,horses)
         attach_jockey_stats(form_data)
     except Exception:
         form_data={}
-    remaining=summary()["remaining"]; result=evaluate(horses,remaining,form_data); pace_now=predict_race_pace(form_data); save_pick(course,race,result); save_validation_prediction(course,race,result,remaining); recs=result["recs"]
+    remaining=summary()["remaining"]; result=evaluate(horses,remaining,form_data,gate_stats); pace_now=predict_race_pace(form_data); save_pick(course,race,result); save_validation_prediction(course,race,result,remaining); recs=result["recs"]
     if recs:
         race_text, gate_key, _, current_zone = gate_condition_display(course, race_condition, recs[0], horses)
-        result["reasons"].append(f"レース条件（確認用・スコア未反映）：{race_text}")
-        result["reasons"].append(f"枠傾向の比較条件（確認用・スコア未反映）：{gate_key}")
-        distance_now = race_condition.get("distance")
+        result["reasons"].append(f"レース条件（枠傾向テスト）：{race_text}")
+        result["reasons"].append(f"枠傾向の比較条件（テスト反映）：{gate_key}")
         if distance_now:
             try:
-                gate_stats = collect_gate_trend_data(course, int(distance_now))
                 result["reasons"].extend(gate_trend_reason_lines(course, int(distance_now), current_zone, gate_stats))
             except Exception:
-                result["reasons"].append("枠傾向データ（確認用・スコア未反映）：取得できませんでした")
+                result["reasons"].append("枠傾向データ（テスト）：取得できませんでした（補正0.0）")
     reasons=''.join(f'<li>{html.escape(x)}</li>' for x in result["reasons"])
     cards=''
     for i,x in enumerate(recs,1):
@@ -2169,7 +2256,14 @@ def batch_predict_course(course, remaining):
                 attach_jockey_stats(form_data)
             except Exception:
                 form_data = {}
-            return race_no, "ok", "", evaluate(horses, remaining, form_data)
+            gate_stats = {}
+            try:
+                rc = nar_get_race_condition(course, race_no)
+                if rc.get("distance"):
+                    gate_stats = gate_trend_stats_cached(course, int(rc["distance"]))
+            except Exception:
+                gate_stats = {}
+            return race_no, "ok", "", evaluate(horses, remaining, form_data, gate_stats)
         except Exception as exc:
             return race_no, "error", f"{type(exc).__name__}: {exc}", None
     out = []
@@ -2277,7 +2371,14 @@ def closing_soon():
             attach_jockey_stats(form_data)
         except Exception:
             form_data = {}
-        result = evaluate(horses, remaining, form_data)
+        gate_stats = {}
+        try:
+            rc = nar_get_race_condition(x["course"], x["race"])
+            if rc.get("distance"):
+                gate_stats = gate_trend_stats_cached(x["course"], int(rc["distance"]))
+        except Exception:
+            gate_stats = {}
+        result = evaluate(horses, remaining, form_data, gate_stats)
         save_pick(x["course"], x["race"], result)
         save_validation_prediction(x["course"], x["race"], result, remaining)
         b = result["recs"][0] if result["recs"] else None
