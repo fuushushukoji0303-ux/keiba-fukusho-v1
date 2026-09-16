@@ -2567,8 +2567,8 @@ def backtest():
     opts=''.join(f'<option value="{html.escape(c)}" {"selected" if c==course else ""}>{html.escape(c)}</option>' for c in NAR_COURSE_CODES)
     ropts=''.join(f'<option value="{n}" {"selected" if n==race else ""}>{n}R</option>' for n in range(1,13))
     form=(
-        '<div class="card"><div class="title">過去レース検証 v3.9.2</div>'
-        '<div class="note">対象日のNAR公式「最終オッズ」と、そのレース時点の出馬表を使うバックテストです。結果・払戻は予想計算後に照合します。</div><div class="actions" style="margin:10px 0"><a class="btn gold" href="/backtest/bulk">過去レースを一括検証（20・50・100件）</a></div>'
+        '<div class="card"><div class="title">過去レース検証 v3.9.3</div>'
+        '<div class="note">対象日のNAR公式「最終オッズ」と、そのレース時点の出馬表を使うバックテストです。結果・払戻は予想計算後に照合します。</div><div class="actions" style="margin:10px 0"><a class="btn gold" href="/backtest/bulk">過去レースを一括検証（50・100・300・500件）</a></div>'
         '<form method="post"><div class="two">'
         f'<div><label>日付</label><input type="date" name="race_date" value="{html.escape(race_date)}" max="{today()}"></div>'
         f'<div><label>競馬場</label><select name="course"><option value="">選択</option>{opts}</select></div>'
@@ -2653,7 +2653,7 @@ def backtest():
         f'<div><span>全ランク仮想300円収支</span><strong>{fixed_profit_text}</strong></div>'
         '</div><br>'
         f'<ul>{reasons}</ul>'
-        '<div class="note">重要：過去ページから取得できるのは最終オッズなので、これは「最終オッズ基準バックテスト」です。発走5分前の実運用と完全同一ではありません。また、未来情報混入を避けるため、騎手リーディングは過去検証では中立扱いにしています。枠傾向も対象日より前のレースだけで集計します。v3.9.2では現在の購入履歴キャリブレーションも過去検証では中立化しています。</div>'
+        '<div class="note">重要：過去ページから取得できるのは最終オッズなので、これは「最終オッズ基準バックテスト」です。発走5分前の実運用と完全同一ではありません。また、未来情報混入を避けるため、騎手リーディングは過去検証では中立扱いにしています。枠傾向も対象日より前のレースだけで集計します。v3.9.3では現在の購入履歴キャリブレーションも過去検証では中立化しています。</div>'
         '</div>'
     )
     return page(body)
@@ -2709,12 +2709,33 @@ def run_backtest_summary(race_date, course, race):
     }
 
 
+def _even_sample_tasks(found, limit_count):
+    """期間全体から決定的に均等抽出。直近日だけに偏るのを避ける。"""
+    found=list(found or [])
+    n=len(found); k=max(1,int(limit_count or 1))
+    if n<=k:
+        return found
+    if k==1:
+        return [found[n//2]]
+    idxs=[]; used=set()
+    for i in range(k):
+        idx=round(i*(n-1)/(k-1))
+        if idx not in used:
+            idxs.append(idx); used.add(idx)
+    if len(idxs)<k:
+        for idx in range(n):
+            if idx not in used:
+                idxs.append(idx); used.add(idx)
+                if len(idxs)>=k: break
+    return [found[i] for i in sorted(idxs[:k])]
+
+
 def discover_backtest_tasks(start_date, end_date, course_filter, limit_count):
     start=datetime.strptime(start_date,"%Y-%m-%d").date()
     end=datetime.strptime(end_date,"%Y-%m-%d").date()
-    dates=[]; d=end
-    while d>=start:
-        dates.append(d.strftime("%Y-%m-%d")); d-=timedelta(days=1)
+    dates=[]; d=start
+    while d<=end:
+        dates.append(d.strftime("%Y-%m-%d")); d+=timedelta(days=1)
     courses=[course_filter] if course_filter in NAR_COURSE_CODES else list(NAR_COURSE_CODES.keys())
     checks=[(d,c) for d in dates for c in courses]; found=[]
     if checks:
@@ -2726,32 +2747,32 @@ def discover_backtest_tasks(start_date, end_date, course_filter, limit_count):
                 except Exception: nums=[]
                 for r in nums: found.append({"race_date":d,"course":c,"race":int(r)})
     order={c:i for i,c in enumerate(NAR_COURSE_CODES.keys())}
-    found.sort(key=lambda x:(x["race_date"],-order.get(x["course"],999),-x["race"]),reverse=True)
-    return found[:int(limit_count)]
+    found.sort(key=lambda x:(x["race_date"],order.get(x["course"],999),x["race"]))
+    return _even_sample_tasks(found,int(limit_count))
 
 
 @app.route("/backtest/bulk", methods=["GET","POST"])
 def backtest_bulk():
     yesterday=(now().date()-timedelta(days=1))
     default_end=yesterday.strftime("%Y-%m-%d")
-    default_start=(yesterday-timedelta(days=2)).strftime("%Y-%m-%d")
+    default_start=(yesterday-timedelta(days=13)).strftime("%Y-%m-%d")
     start_date=request.values.get("start_date",default_start).strip()
     end_date=request.values.get("end_date",default_end).strip()
     course=request.values.get("course","").strip()
-    limit_count=to_int(request.values.get("limit","50"),50)
-    if limit_count not in (20,50,100): limit_count=50
+    limit_count=to_int(request.values.get("limit","100"),100)
+    if limit_count not in (50,100,300,500): limit_count=100
     opts='<option value="">全開催場</option>'+''.join(f'<option value="{html.escape(c)}" {"selected" if c==course else ""}>{html.escape(c)}</option>' for c in NAR_COURSE_CODES)
-    limopts=''.join(f'<option value="{n}" {"selected" if n==limit_count else ""}>{n}レース</option>' for n in (20,50,100))
+    limopts=''.join(f'<option value="{n}" {"selected" if n==limit_count else ""}>{n}レース</option>' for n in (50,100,300,500))
     form=(
-        '<div class="card"><div class="title">過去レース一括バックテスト v3.9.2</div>'
-        '<div class="note">NAR公式の過去最終オッズと当時の出馬表を使い、20・50・100レースを自動検証します。4レースずつ分割して処理するため、画面を閉じずに完了までお待ちください。</div>'
+        '<div class="card"><div class="title">過去レース一括バックテスト v3.9.3</div>'
+        '<div class="note">NAR公式の過去最終オッズと当時の出馬表を使い、50・100・300・500レースを自動検証します。対象は期間全体から均等に抽出し、直近日だけへの偏りを抑えます。4レースずつ分割して処理するため、画面を閉じずに完了までお待ちください。</div>'
         '<form method="post"><div class="two">'
         f'<div><label>開始日</label><input type="date" name="start_date" value="{html.escape(start_date)}" max="{default_end}"></div>'
         f'<div><label>終了日</label><input type="date" name="end_date" value="{html.escape(end_date)}" max="{default_end}"></div>'
         f'<div><label>競馬場</label><select name="course">{opts}</select></div>'
         f'<div><label>最大検証数</label><select name="limit">{limopts}</select></div>'
         '</div><br><button class="green">一括検証をスタート</button></form>'
-        '<div class="small" style="margin-top:8px">※過去検証では現在の騎手リーディングと現在の購入履歴キャリブレーションを中立化し、枠傾向は対象日より前だけを使用します。最終オッズ基準のため、発走5分前運用と完全同一ではありません。</div></div>'
+        '<div class="small" style="margin-top:8px">※過去検証では現在の騎手リーディングと現在の購入履歴キャリブレーションを中立化し、枠傾向は対象日より前だけを使用します。最終オッズ基準のため、発走5分前運用と完全同一ではありません。300・500件は処理に時間がかかります。</div></div>'
     )
     if request.method=="GET": return page(form)
     try:
@@ -2759,24 +2780,12 @@ def backtest_bulk():
     except Exception:
         return page(form+'<div class="bad">日付を正しく選んでください。</div>')
     if sd>ed or ed>=now().date(): return page(form+'<div class="bad">終了済みの過去日付を、開始日≦終了日で選んでください。</div>')
-    if (ed-sd).days>30: return page(form+'<div class="bad">一度に指定できる期間は31日以内です。</div>')
+    if (ed-sd).days>60: return page(form+'<div class="bad">一度に指定できる期間は61日以内です。</div>')
     try: tasks=discover_backtest_tasks(start_date,end_date,course,limit_count)
     except Exception as e: return page(form+f'<div class="bad">対象レース検索エラー：{html.escape(type(e).__name__)}</div>')
     if not tasks: return page(form+'<div class="note">指定期間に検証できるレースが見つかりませんでした。</div>')
     tasks_json=json.dumps(tasks,ensure_ascii=False).replace('</','<\\/')
-    runner="""
-<div class="card"><div class="title">一括検証 進行状況</div><div id="progressText">準備中…</div><div style="height:14px;background:#edf1f5;border-radius:9px;overflow:hidden;margin-top:8px"><div id="progressBar" style="height:100%;width:0%;background:#2f8f5b"></div></div></div>
-<div class="card"><div class="title">集計結果</div><div id="overall" class="stats-grid"></div></div>
-<div class="card"><div class="title">ランク別 詳細</div><div id="rankTable"></div></div>
-<div class="card"><div class="title">検証レース</div><div id="rows"></div></div>
-<script>
-const tasks=__TASKS__; let done=0, results=[], failed=0;
-const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
-function pct(a,b){return b?((a/b)*100).toFixed(1)+'%':'－'} function yen(n){return Number(n||0).toLocaleString('ja-JP')+'円'}
-function update(){const ok=results.filter(x=>x.ok),n=ok.length,h=ok.filter(x=>x.result==='的中').length,vs=ok.reduce((a,x)=>a+x.virtual_stake,0),vr=ok.reduce((a,x)=>a+x.virtual_return,0),rs=ok.reduce((a,x)=>a+x.rule_stake,0),rr=ok.reduce((a,x)=>a+x.rule_return,0);document.getElementById('progressText').textContent=`${done} / ${tasks.length} レース完了　取得成功 ${n}　取得不可 ${failed}`;document.getElementById('progressBar').style.width=(tasks.length?done/tasks.length*100:0)+'%';document.getElementById('overall').innerHTML=`<div><span>検証成功</span><strong>${n}</strong></div><div><span>的中率</span><strong>${pct(h,n)}</strong></div><div><span>全ランク仮想300円 回収率</span><strong>${pct(vr,vs)}</strong></div><div><span>仮想収支</span><strong>${vr-vs>=0?'+':''}${yen(vr-vs)}</strong></div><div><span>現行S/Aルール 購入額</span><strong>${yen(rs)}</strong></div><div><span>現行S/Aルール 回収率</span><strong>${pct(rr,rs)}</strong></div><div><span>現行S/Aルール 払戻</span><strong>${yen(rr)}</strong></div><div><span>現行S/Aルール 収支</span><strong>${rr-rs>=0?'+':''}${yen(rr-rs)}</strong></div>`;let t='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse"><tr><th>ランク</th><th>件数</th><th>的中率</th><th>単勝的中</th><th>複勝的中</th><th>仮想回収率</th><th>仮想収支</th><th>現行ルール回収率</th></tr>';for(const g of ['S','A','B','見送り']){const a=ok.filter(x=>x.grade===g),q=a.length,hh=a.filter(x=>x.result==='的中').length,wh=a.filter(x=>x.win_hit).length,ph=a.filter(x=>x.place_hit).length,vss=a.reduce((z,x)=>z+x.virtual_stake,0),vrr=a.reduce((z,x)=>z+x.virtual_return,0),rss=a.reduce((z,x)=>z+x.rule_stake,0),rrr=a.reduce((z,x)=>z+x.rule_return,0);t+=`<tr><td><b>${g}</b></td><td>${q}</td><td>${pct(hh,q)}</td><td>${pct(wh,q)}</td><td>${pct(ph,q)}</td><td>${pct(vrr,vss)}</td><td>${vrr-vss>=0?'+':''}${yen(vrr-vss)}</td><td>${pct(rrr,rss)}</td></tr>`}t+='</table></div>';document.getElementById('rankTable').innerHTML=t;}
-function addRows(a){const b=document.getElementById('rows');for(const x of a){if(!x.ok){b.insertAdjacentHTML('beforeend',`<div class="note">${esc(x.race_date)} ${esc(x.course)} ${x.race}R：${esc(x.error)}</div>`);continue}b.insertAdjacentHTML('beforeend',`<div class="horse-card"><div class="horse-name">${esc(x.race_date)}　${esc(x.course)} ${x.race}R　<span class="grade">${esc(x.grade)}</span></div><div>${x.horse_no}番 ${esc(x.horse_name)}　スコア ${x.score}　結果 <b>${esc(x.result)}</b></div><div class="small">単勝 ${x.win_odds.toFixed(1)}倍 / 複勝 ${x.place_low.toFixed(1)}～${x.place_high.toFixed(1)} / 仮想300円収支 ${x.virtual_profit>=0?'+':''}${yen(x.virtual_profit)} / 現行ルール ${x.rule_stake?yen(x.rule_stake):'見送り'}</div></div>`)}}
-async function run(){for(let i=0;i<tasks.length;i+=4){const c=tasks.slice(i,i+4);try{const r=await fetch('/backtest/bulk/chunk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tasks:c})});const d=await r.json(),a=d.results||[];results.push(...a);failed+=a.filter(x=>!x.ok).length;done+=c.length;addRows(a);update()}catch(e){failed+=c.length;done+=c.length;update()}}document.getElementById('progressText').textContent+='　✓ 完了'} update();run();
-</script>""".replace('__TASKS__',tasks_json)
+    runner=r'''\n<div class="card"><div class="title">一括検証 進行状況</div><div id="progressText">準備中…</div><div style="height:14px;background:#edf1f5;border-radius:9px;overflow:hidden;margin-top:8px"><div id="progressBar" style="height:100%;width:0%;background:#2f8f5b"></div></div></div>\n<div class="card"><div class="title">集計結果</div><div id="overall" class="stats-grid"></div></div>\n<div class="card"><div class="title">ランク別 詳細</div><div id="rankTable"></div></div>\n<div class="card"><div class="title">期間別 詳細</div><div class="small">検証期間を最大5区間に分け、成績が一部期間だけに偏っていないか確認します。</div><div id="periodTable"></div></div>\n<div class="card"><div class="title">競馬場別 詳細</div><div class="small">件数の多い順に表示します。少数サンプルの回収率は参考値です。</div><div id="courseTable"></div></div>\n<div class="card"><div class="title">検証レース</div><div id="rows"></div></div>\n<script>\nconst tasks=__TASKS__; let done=0, results=[], failed=0;\nconst esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));\nfunction pct(a,b){return b?((a/b)*100).toFixed(1)+'%':'－'} function yen(n){return Number(n||0).toLocaleString('ja-JP')+'円'}\nfunction summary(a){const q=a.length,hh=a.filter(x=>x.result==='的中').length,wh=a.filter(x=>x.win_hit).length,ph=a.filter(x=>x.place_hit).length,vs=a.reduce((z,x)=>z+x.virtual_stake,0),vr=a.reduce((z,x)=>z+x.virtual_return,0),rs=a.reduce((z,x)=>z+x.rule_stake,0),rr=a.reduce((z,x)=>z+x.rule_return,0);return {q,hh,wh,ph,vs,vr,rs,rr}}\nfunction tableWrap(head,rows){return '<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse"><tr>'+head.map(x=>'<th>'+x+'</th>').join('')+'</tr>'+rows.join('')+'</table></div>'}\nfunction update(){\n const ok=results.filter(x=>x.ok),s=summary(ok);\n document.getElementById('progressText').textContent=`${done} / ${tasks.length} レース完了　取得成功 ${s.q}　取得不可 ${failed}`;\n document.getElementById('progressBar').style.width=(tasks.length?done/tasks.length*100:0)+'%';\n document.getElementById('overall').innerHTML=`<div><span>検証成功</span><strong>${s.q}</strong></div><div><span>的中率</span><strong>${pct(s.hh,s.q)}</strong></div><div><span>全ランク仮想300円 回収率</span><strong>${pct(s.vr,s.vs)}</strong></div><div><span>仮想収支</span><strong>${s.vr-s.vs>=0?'+':''}${yen(s.vr-s.vs)}</strong></div><div><span>現行S/Aルール 購入額</span><strong>${yen(s.rs)}</strong></div><div><span>現行S/Aルール 回収率</span><strong>${pct(s.rr,s.rs)}</strong></div><div><span>現行S/Aルール 払戻</span><strong>${yen(s.rr)}</strong></div><div><span>現行S/Aルール 収支</span><strong>${s.rr-s.rs>=0?'+':''}${yen(s.rr-s.rs)}</strong></div>`;\n let rr=[]; for(const g of ['S','A','B','見送り']){const a=ok.filter(x=>x.grade===g),z=summary(a);rr.push(`<tr><td><b>${g}</b></td><td>${z.q}</td><td>${pct(z.hh,z.q)}</td><td>${pct(z.wh,z.q)}</td><td>${pct(z.ph,z.q)}</td><td>${pct(z.vr,z.vs)}</td><td>${z.vr-z.vs>=0?'+':''}${yen(z.vr-z.vs)}</td><td>${pct(z.rr,z.rs)}</td></tr>`)}\n document.getElementById('rankTable').innerHTML=tableWrap(['ランク','件数','的中率','単勝的中','複勝的中','仮想回収率','仮想収支','現行ルール回収率'],rr);\n renderPeriods(ok); renderCourses(ok);\n}\nfunction renderPeriods(ok){\n if(!ok.length){document.getElementById('periodTable').innerHTML='－';return}\n const dates=[...new Set(ok.map(x=>x.race_date))].sort(), parts=Math.min(5,dates.length), groups=[];\n for(let i=0;i<parts;i++){const a=Math.floor(i*dates.length/parts),b=Math.floor((i+1)*dates.length/parts),ds=dates.slice(a,b); if(ds.length) groups.push(ds)}\n const rows=[]; for(const ds of groups){const set=new Set(ds),a=ok.filter(x=>set.has(x.race_date)),z=summary(a),label=ds[0]===ds[ds.length-1]?ds[0]:`${ds[0]}～${ds[ds.length-1]}`;rows.push(`<tr><td>${label}</td><td>${z.q}</td><td>${pct(z.hh,z.q)}</td><td>${pct(z.vr,z.vs)}</td><td>${z.vr-z.vs>=0?'+':''}${yen(z.vr-z.vs)}</td><td>${pct(z.rr,z.rs)}</td><td>${z.rr-z.rs>=0?'+':''}${yen(z.rr-z.rs)}</td></tr>`)}\n document.getElementById('periodTable').innerHTML=tableWrap(['期間','件数','的中率','仮想回収率','仮想収支','現行S/A回収率','現行S/A収支'],rows)\n}\nfunction renderCourses(ok){\n const names=[...new Set(ok.map(x=>x.course))].sort((a,b)=>ok.filter(x=>x.course===b).length-ok.filter(x=>x.course===a).length),rows=[];\n for(const c of names){const a=ok.filter(x=>x.course===c),z=summary(a);rows.push(`<tr><td><b>${esc(c)}</b></td><td>${z.q}</td><td>${pct(z.hh,z.q)}</td><td>${pct(z.vr,z.vs)}</td><td>${z.vr-z.vs>=0?'+':''}${yen(z.vr-z.vs)}</td><td>${pct(z.rr,z.rs)}</td><td>${z.rr-z.rs>=0?'+':''}${yen(z.rr-z.rs)}</td></tr>`)}\n document.getElementById('courseTable').innerHTML=tableWrap(['競馬場','件数','的中率','仮想回収率','仮想収支','現行S/A回収率','現行S/A収支'],rows)\n}\nfunction addRows(a){const b=document.getElementById('rows');for(const x of a){if(!x.ok){b.insertAdjacentHTML('beforeend',`<div class="note">${esc(x.race_date)} ${esc(x.course)} ${x.race}R：${esc(x.error)}</div>`);continue}b.insertAdjacentHTML('beforeend',`<div class="horse-card"><div class="horse-name">${esc(x.race_date)}　${esc(x.course)} ${x.race}R　<span class="grade">${esc(x.grade)}</span></div><div>${x.horse_no}番 ${esc(x.horse_name)}　スコア ${x.score}　結果 <b>${esc(x.result)}</b></div><div class="small">単勝 ${x.win_odds.toFixed(1)}倍 / 複勝 ${x.place_low.toFixed(1)}～${x.place_high.toFixed(1)} / 仮想300円収支 ${x.virtual_profit>=0?'+':''}${yen(x.virtual_profit)} / 現行ルール ${x.rule_stake?yen(x.rule_stake):'見送り'}</div></div>`)} }\nasync function run(){for(let i=0;i<tasks.length;i+=4){const c=tasks.slice(i,i+4);try{const r=await fetch('/backtest/bulk/chunk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tasks:c})});const d=await r.json(),a=d.results||[];results.push(...a);failed+=a.filter(x=>!x.ok).length;done+=c.length;addRows(a);update()}catch(e){failed+=c.length;done+=c.length;update()}}document.getElementById('progressText').textContent+='　✓ 完了'} update();run();\n</script>'''.replace('\\n','\n').replace('__TASKS__',tasks_json)
     return page(form+runner)
 
 
