@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.9.9 - 利益重視条件探索版
+地方競馬 単勝＋複勝投票管理 v3.10.0 - 前向き検証版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -110,6 +110,25 @@ def init_db():
             official_result TEXT DEFAULT '',
             checked_at TEXT DEFAULT '',
             result_source TEXT DEFAULT '',
+            UNIQUE(race_date, course, race)
+        );
+        CREATE TABLE IF NOT EXISTS forward_validation(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            race_date TEXT NOT NULL, recorded_at TEXT NOT NULL,
+            course TEXT NOT NULL, race TEXT NOT NULL,
+            horse_no INTEGER NOT NULL, horse_name TEXT NOT NULL,
+            win_odds REAL NOT NULL DEFAULT 0,
+            place_low REAL NOT NULL DEFAULT 0, place_high REAL NOT NULL DEFAULT 0,
+            spread REAL NOT NULL DEFAULT 0,
+            grade TEXT NOT NULL, score INTEGER NOT NULL,
+            confidence INTEGER NOT NULL DEFAULT 0, market_rank INTEGER NOT NULL DEFAULT 99,
+            current_sa INTEGER NOT NULL DEFAULT 0,
+            candidate_a INTEGER NOT NULL DEFAULT 0,
+            candidate_s1 INTEGER NOT NULL DEFAULT 0,
+            candidate_s2 INTEGER NOT NULL DEFAULT 0,
+            result TEXT NOT NULL DEFAULT '未確定',
+            return_amount INTEGER NOT NULL DEFAULT 0,
+            official_result TEXT DEFAULT '', checked_at TEXT DEFAULT '', result_source TEXT DEFAULT '',
             UNIQUE(race_date, course, race)
         );
         CREATE TABLE IF NOT EXISTS gate_trend_races(
@@ -331,6 +350,53 @@ def save_validation_prediction(course, race, result, remaining):
             course, f"{race}R", b["horse_no"], b["horse_name"],
             b["win_odds"], b["place_low"], b["place_high"],
             result["grade"], result["score"], b["ev_index"], amount
+        ))
+    # v3.10.0: この版を入れた後に取得した予想だけを前向き検証へ固定保存する。
+    save_forward_validation_prediction(course, race, result)
+
+
+def _forward_rule_flags(result):
+    """v3.9.9で確認した条件を固定。以後の成績だけで比較し、過去結果から条件を作り直さない。"""
+    if not result.get("recs"):
+        return None
+    b = result["recs"][0]
+    score = int(result.get("score") or 0)
+    conf = int(b.get("confidence") or 0)
+    rank = int(b.get("market_rank") or 99)
+    low = float(b.get("place_low") or 0)
+    spread = float(b.get("spread") or 0)
+    return {
+        "current_sa": int(result.get("grade") in ("S", "A")),
+        # v3.9.9 A候補1：70 / 68 / 3位以内 / 1.4倍以上 / 幅制限なし
+        "candidate_a": int(score >= 70 and conf >= 68 and rank <= 3 and low >= 1.4),
+        # v3.9.9 S候補1：76 / 72 / 3位以内 / 1.4倍以上 / 幅35%以下
+        "candidate_s1": int(score >= 76 and conf >= 72 and rank <= 3 and low >= 1.4 and spread <= 0.35),
+        # v3.9.9 S候補2：76 / 82 / 2位以内 / 1.5倍以上 / 幅50%以下
+        "candidate_s2": int(score >= 76 and conf >= 82 and rank <= 2 and low >= 1.5 and spread <= 0.50),
+    }
+
+
+def save_forward_validation_prediction(course, race, result):
+    flags = _forward_rule_flags(result)
+    if not flags or not result.get("recs"):
+        return
+    b = result["recs"][0]
+    with db() as con:
+        con.execute("""
+        INSERT INTO forward_validation(
+            race_date,recorded_at,course,race,horse_no,horse_name,
+            win_odds,place_low,place_high,spread,grade,score,confidence,market_rank,
+            current_sa,candidate_a,candidate_s1,candidate_s2
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(race_date,course,race) DO NOTHING
+        """, (
+            today(), now().strftime("%Y-%m-%d %H:%M:%S"), course, f"{race}R",
+            int(b.get("horse_no") or 0), str(b.get("horse_name") or ""),
+            float(b.get("win_odds") or 0), float(b.get("place_low") or 0),
+            float(b.get("place_high") or 0), float(b.get("spread") or 0),
+            str(result.get("grade") or "見送り"), int(result.get("score") or 0),
+            int(b.get("confidence") or 0), int(b.get("market_rank") or 99),
+            flags["current_sa"], flags["candidate_a"], flags["candidate_s1"], flags["candidate_s2"]
         ))
 
 
@@ -2178,7 +2244,7 @@ body{
 
 def page(body,title=APP_TITLE):
     member=(f'<div class="member-status">会員ログイン中：{html.escape(str(session.get("member_id","")))}　<a href="/logout">ログアウト</a></div>' if LOGIN_ENABLED and session.get("member_authenticated") else ('<div class="member-status setup">販売前：会員ログイン未設定</div>' if not LOGIN_ENABLED else ''))
-    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="パカおとパカ美のワクワク競馬"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="brand-banner"><div class="hero-slogan">競馬を<br><span>もっと身近に、<br>もっと楽しく！</span></div><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美のワクワク競馬"><div class="hero-sign">🍀 一緒に<br><b>夢をつかもう！</b></div><div class="brand-sub">🍀 競馬をもっと身近に、もっと楽しく！　単勝＋複勝 1頭勝負 🍀</div></div><div class="nav"><a class="btn secondary" href="/">⌂　ホーム</a><a class="btn secondary" href="/analyze">▥　1頭勝負予想</a><a class="btn secondary" href="/picks">♛　今日の本命</a><a class="btn secondary" href="/history">▣　成績履歴</a><a class="btn secondary" href="/analytics">▥　成績分析</a><a class="btn secondary" href="/validation">⌕　予想検証</a><a class="btn secondary" href="/backtest">↶　過去レース検証</a><a class="btn secondary" href="/courses">▦　本日の開催</a><a class="btn green" href="/closing-soon">◷　発走5分前</a></div>{member}{body}<div class="mascot-card"><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美"><div class="mascot-msg">✨ パカおとパカ美と一緒に ✨<br><span>データを味方に楽しく予想！</span><br><b>ワクワクするレースを見つけよう♪</b></div></div><div class="note">このv3は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
+    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="パカおとパカ美のワクワク競馬"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="brand-banner"><div class="hero-slogan">競馬を<br><span>もっと身近に、<br>もっと楽しく！</span></div><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美のワクワク競馬"><div class="hero-sign">🍀 一緒に<br><b>夢をつかもう！</b></div><div class="brand-sub">🍀 競馬をもっと身近に、もっと楽しく！　単勝＋複勝 1頭勝負 🍀</div></div><div class="nav"><a class="btn secondary" href="/">⌂　ホーム</a><a class="btn secondary" href="/analyze">▥　1頭勝負予想</a><a class="btn secondary" href="/picks">♛　今日の本命</a><a class="btn secondary" href="/history">▣　成績履歴</a><a class="btn secondary" href="/analytics">▥　成績分析</a><a class="btn secondary" href="/validation">⌕　予想検証</a><a class="btn secondary" href="/forward-validation">▶　前向き検証</a><a class="btn secondary" href="/backtest">↶　過去レース検証</a><a class="btn secondary" href="/courses">▦　本日の開催</a><a class="btn green" href="/closing-soon">◷　発走5分前</a></div>{member}{body}<div class="mascot-card"><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美"><div class="mascot-msg">✨ パカおとパカ美と一緒に ✨<br><span>データを味方に楽しく予想！</span><br><b>ワクワクするレースを見つけよう♪</b></div></div><div class="note">このv3は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
 
 
 def login_page(message=""):
@@ -3067,6 +3133,105 @@ def validation_auto_results():
         updated += 1
     return redirect(url_for("validation", updated=updated, pending=pending))
 
+
+
+@app.get("/forward-validation")
+def forward_validation():
+    with db() as con:
+        rows = con.execute("SELECT * FROM forward_validation ORDER BY race_date DESC,id DESC LIMIT 1000").fetchall()
+    settled = [r for r in rows if r["result"] in ("的中", "ハズレ")]
+    rules = [
+        ("現行S/A", "current_sa", "現在の本番S/A判定"),
+        ("有力A候補", "candidate_a", "70点以上・候補評価68以上・3位以内・複勝1.4倍以上"),
+        ("S候補1", "candidate_s1", "76点以上・候補評価72以上・3位以内・複勝1.4倍以上・オッズ幅35%以下"),
+        ("S候補2", "candidate_s2", "76点以上・候補評価82以上・2位以内・複勝1.5倍以上・オッズ幅50%以下"),
+    ]
+    cards = ""
+    table_rows = ""
+    for label, col, desc in rules:
+        all_sel = [r for r in rows if int(r[col] or 0) == 1]
+        sel = [r for r in settled if int(r[col] or 0) == 1]
+        n = len(sel)
+        hits = sum(1 for r in sel if r["result"] == "的中")
+        stake = n * 300
+        ret = sum(int(r["return_amount"] or 0) for r in sel)
+        roi = (ret / stake * 100) if stake else None
+        profit = ret - stake
+        roi_text = f"{roi:.1f}%" if roi is not None else "－"
+        cards += (
+            '<div class="horse-card">'
+            f'<div class="horse-name">{html.escape(label)}</div><div class="small">{html.escape(desc)}</div>'
+            '<div class="stats-grid">'
+            f'<div><span>登録</span><strong>{len(all_sel)}件</strong></div>'
+            f'<div><span>確定</span><strong>{n}件</strong></div>'
+            f'<div><span>的中率</span><strong>{(hits/n*100 if n else 0):.1f}%</strong></div>'
+            f'<div><span>仮想回収率</span><strong>{roi_text}</strong></div>'
+            f'<div><span>仮想購入額</span><strong>{stake:,}円</strong></div>'
+            f'<div><span>仮想払戻</span><strong>{ret:,}円</strong></div>'
+            f'<div><span>仮想収支</span><strong>{profit:+,}円</strong></div>'
+            '</div></div>'
+        )
+        table_rows += f'<tr><td><b>{html.escape(label)}</b></td><td>{len(all_sel)}</td><td>{n}</td><td>{(hits/n*100 if n else 0):.1f}%</td><td>{roi_text}</td><td>{profit:+,}円</td></tr>'
+
+    recent = ""
+    for r in rows[:80]:
+        tags=[]
+        if int(r["current_sa"] or 0): tags.append("現行S/A")
+        if int(r["candidate_a"] or 0): tags.append("有力A")
+        if int(r["candidate_s1"] or 0): tags.append("S候補1")
+        if int(r["candidate_s2"] or 0): tags.append("S候補2")
+        tag_text=" / ".join(tags) if tags else "4条件すべて対象外"
+        recent += (
+            '<div class="horse-card">'
+            f'<div class="horse-name">{r["race_date"]}　{html.escape(r["course"])} {html.escape(r["race"])}　{r["horse_no"]}番 {html.escape(r["horse_name"])}</div>'
+            f'<div class="small">{html.escape(tag_text)}</div>'
+            '<div class="pick-grid">'
+            f'<div><span>判定</span><strong>{html.escape(r["grade"])}</strong></div>'
+            f'<div><span>スコア</span><strong>{r["score"]}</strong></div>'
+            f'<div><span>候補評価</span><strong>{r["confidence"]}</strong></div>'
+            f'<div><span>人気</span><strong>{r["market_rank"]}位</strong></div>'
+            f'<div><span>複勝</span><strong>{float(r["place_low"]):.1f}～{float(r["place_high"]):.1f}</strong></div>'
+            f'<div><span>オッズ幅</span><strong>{float(r["spread"])*100:.1f}%</strong></div>'
+            f'<div><span>結果</span><strong>{html.escape(r["result"])}</strong></div>'
+            f'<div><span>仮想払戻</span><strong>{int(r["return_amount"] or 0):,}円</strong></div>'
+            '</div></div>'
+        )
+    body = (
+        '<div class="card"><div class="title">前向き検証 v3.10.0</div>'
+        '<div class="note"><b>ここからが本番の比較です。</b><br>v3.9.9で決めた条件を固定し、このv3.10.0導入後に新しく取得したレースだけを記録します。過去500レースを使って条件を作り直さないため、過去データへの合わせ過ぎを確認できます。予想スコア・S/A判定そのものは変更していません。</div>'
+        '<form method="post" action="/forward-validation/auto-results"><button class="green">NAR公式から未確定結果を自動取得</button></form>'
+        f'<div class="validation-grid" style="margin-top:10px"><div>新規記録<br><strong>{len(rows)}</strong></div><div>結果確定<br><strong>{len(settled)}</strong></div><div>比較条件<br><strong>4</strong></div><div>固定開始<br><strong>v3.10.0</strong></div></div></div>'
+        '<div class="card"><div class="title">4条件 前向き比較</div>'
+        '<div class="small">各条件に該当したレースを単勝100円＋複勝200円＝仮想300円で購入したものとして比較します。実際の購入履歴とは別です。</div>'
+        f'{cards}</div>'
+        '<div class="card"><div class="title">比較一覧</div><div class="scroll"><table><tr><th>条件</th><th>登録</th><th>確定</th><th>的中率</th><th>回収率</th><th>収支</th></tr>'
+        f'{table_rows}</table></div></div>'
+        '<div class="card"><div class="title">前向き検証レース</div>' + (recent or '<div class="note">まだ記録がありません。今日以降に「1頭勝負予想」「開催一括予想」「発走5分前」を使うと自動記録されます。</div>') + '</div>'
+    )
+    return page(body)
+
+
+@app.post("/forward-validation/auto-results")
+def forward_validation_auto_results():
+    with db() as con:
+        rows = con.execute("SELECT * FROM forward_validation WHERE result='未確定'").fetchall()
+    updated = 0
+    pending = 0
+    for r in rows:
+        race_no = to_int(re.sub(r"\D", "", r["race"]), 0)
+        settled = settle_tanfuku(r["horse_no"], nar_get_tanfuku_refunds(r["course"], race_no, r["race_date"]))
+        if not settled:
+            pending += 1
+            continue
+        with db() as con:
+            con.execute("""UPDATE forward_validation
+                SET result=?,return_amount=?,official_result=?,checked_at=?,result_source='NAR公式'
+                WHERE id=?""", (
+                settled["result"], settled["return_amount"], settled["official_result"],
+                now().strftime("%Y-%m-%d %H:%M:%S"), r["id"]
+            ))
+        updated += 1
+    return redirect(url_for("forward_validation", updated=updated, pending=pending))
 
 
 @app.get("/health")
