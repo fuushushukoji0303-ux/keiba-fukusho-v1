@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.8.3 - 枠傾向補正テスト版
+地方競馬 単勝＋複勝投票管理 v3.9 - 過去レース検証版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -191,8 +191,9 @@ def nar_fetch(url, timeout=15):
 
 def nar_date_text(): return now().strftime("%Y/%m/%d")
 
-def nar_url(page_name, course, race):
-    q = urllib.parse.urlencode({"k_babaCode":NAR_COURSE_CODES[course], "k_raceDate":nar_date_text(), "k_raceNo":int(race)})
+def nar_url(page_name, course, race, race_date=None):
+    date_text = str(race_date).replace("-", "/") if race_date else nar_date_text()
+    q = urllib.parse.urlencode({"k_babaCode":NAR_COURSE_CODES[course], "k_raceDate":date_text, "k_raceNo":int(race)})
     return f"{NAR_BASE_URL}/{page_name}?{q}"
 
 
@@ -365,8 +366,11 @@ def body_weight_display(horse):
     return f"{int(w)}kg（{int(ch):+d}kg）"
 
 
-def nar_get_horses(course, race):
-    text = nar_fetch(nar_url("OddsTanFuku", course, race))
+def nar_get_horses(course, race, race_date=None, final_odds=False):
+    odds_url = nar_url("OddsTanFuku", course, race, race_date)
+    if final_odds:
+        odds_url += "&odds_flg=5"
+    text = nar_fetch(odds_url)
     p=SimpleTableParser(); p.feed(text); horses=[]
     for row in p.rows:
         if len(row)<5: continue
@@ -393,10 +397,10 @@ def nar_get_horses(course, race):
     return horses
 
 
-def nar_get_race_condition(course_name, race_no):
+def nar_get_race_condition(course_name, race_no, race_date=None):
     """v3.8.1確認用。NAR公式出馬表から当該レースの馬場種別・距離・回りを取得する。スコアには使わない。"""
     try:
-        text = nar_fetch(nar_url("DebaTable", course_name, race_no), timeout=12)
+        text = nar_fetch(nar_url("DebaTable", course_name, race_no, race_date), timeout=12)
     except Exception:
         return {"surface": None, "distance": None, "direction": None}
     plain = html.unescape(re.sub(r"<[^>]+>", " ", text))
@@ -717,6 +721,78 @@ def gate_trend_test_adjust(horse, horses=None, summary_data=None):
 
 _GATE_TREND_RUNTIME_CACHE = {}
 
+
+def gate_trend_summary_before(course_name, distance, before_date):
+    """過去検証専用。対象レース日より前に収集済みのレースだけで枠傾向を集計する。"""
+    with db() as con:
+        rows = con.execute("""
+            SELECT * FROM gate_trend_races
+            WHERE course=? AND distance=? AND race_date < ?
+            ORDER BY race_date DESC, race DESC
+            LIMIT 80
+        """, (course_name, int(distance), str(before_date))).fetchall()
+    out = {
+        "race_count": len(rows),
+        "内寄り": {"starters": 0, "top3": 0},
+        "中ほど": {"starters": 0, "top3": 0},
+        "外寄り": {"starters": 0, "top3": 0},
+    }
+    for r in rows:
+        out["内寄り"]["starters"] += int(r["inner_starters"])
+        out["内寄り"]["top3"] += int(r["inner_top3"])
+        out["中ほど"]["starters"] += int(r["middle_starters"])
+        out["中ほど"]["top3"] += int(r["middle_top3"])
+        out["外寄り"]["starters"] += int(r["outer_starters"])
+        out["外寄り"]["top3"] += int(r["outer_top3"])
+    return out
+
+
+def gate_trend_stats_for_backtest(course_name, distance, target_date, lookback_days=14, max_result_pages=30):
+    """対象日より前だけを使う枠傾向。未来データ混入を避ける。"""
+    try:
+        target = datetime.strptime(str(target_date), "%Y-%m-%d").date()
+    except Exception:
+        return {}
+    dates = [(target - timedelta(days=i)).strftime("%Y-%m-%d") for i in range(1, lookback_days + 1)]
+    day_races = []
+    with ThreadPoolExecutor(max_workers=min(7, len(dates))) as pool:
+        fmap = {pool.submit(nar_race_numbers_for_date, course_name, d): d for d in dates}
+        for f in as_completed(fmap):
+            d = fmap[f]
+            try:
+                nums = f.result()
+            except Exception:
+                nums = []
+            if nums:
+                day_races.append((d, nums))
+    day_races.sort(reverse=True)
+    tasks=[]
+    for d, nums in day_races:
+        for r in sorted(nums, reverse=True):
+            tasks.append((d, r))
+            if len(tasks) >= max_result_pages:
+                break
+        if len(tasks) >= max_result_pages:
+            break
+    missing=[]
+    with db() as con:
+        for d,r in tasks:
+            old=con.execute("SELECT 1 FROM gate_trend_races WHERE race_date=? AND course=? AND race=?",(d,course_name,int(r))).fetchone()
+            if old is None:
+                missing.append((d,r))
+    if missing:
+        with ThreadPoolExecutor(max_workers=min(6,len(missing))) as pool:
+            fmap={pool.submit(nar_fetch,nar_url_for_date("RaceMarkTable",course_name,r,d),10):(d,r) for d,r in missing}
+            for f in as_completed(fmap):
+                d,r=fmap[f]
+                try:
+                    parsed=parse_gate_trend_race(f.result(),distance)
+                    if parsed:
+                        _save_gate_trend_race(d,course_name,r,parsed)
+                except Exception:
+                    pass
+    return gate_trend_summary_before(course_name, int(distance), str(target_date))
+
 def gate_trend_stats_cached(course_name, distance):
     """同一プロセス内では競馬場×距離の収集結果を再利用し、一括予想の負荷を抑える。"""
     if not course_name or not distance:
@@ -836,10 +912,10 @@ def _extract_margin_final3f(block):
     return rows
 
 
-def nar_get_margin_final3f_small(course_name, race_no, horses=None):
+def nar_get_margin_final3f_small(course_name, race_no, horses=None, race_date=None):
     """NAR公式の印刷用出馬表(DebaTableSmall)から過去走のタイム差＋上がり3Fを取得。"""
     try:
-        page_text=nar_fetch(nar_url("DebaTableSmall",course_name,race_no),timeout=15)
+        page_text=nar_fetch(nar_url("DebaTableSmall",course_name,race_no,race_date),timeout=15)
     except Exception:
         return {}
     plain=re.sub(r"(?is)<script.*?</script>"," ",page_text)
@@ -925,9 +1001,9 @@ def nar_get_margin_final3f_small(course_name, race_no, horses=None):
             result[horse_no]=rows
     return result
 
-def nar_get_form_data(course_name, race_no, horses=None):
-    small_margin_data=nar_get_margin_final3f_small(course_name,race_no,horses)
-    url=nar_url("DebaTable",course_name,race_no)
+def nar_get_form_data(course_name, race_no, horses=None, race_date=None):
+    small_margin_data=nar_get_margin_final3f_small(course_name,race_no,horses,race_date)
+    url=nar_url("DebaTable",course_name,race_no,race_date)
     req=urllib.request.Request(url,headers={"User-Agent":"Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/140.0.0.0 Safari/537.36","Accept-Language":"ja-JP,ja;q=0.9"})
     with urllib.request.urlopen(req,timeout=15) as res:
         raw=res.read()
@@ -2014,7 +2090,7 @@ body{
 
 def page(body,title=APP_TITLE):
     member=(f'<div class="member-status">会員ログイン中：{html.escape(str(session.get("member_id","")))}　<a href="/logout">ログアウト</a></div>' if LOGIN_ENABLED and session.get("member_authenticated") else ('<div class="member-status setup">販売前：会員ログイン未設定</div>' if not LOGIN_ENABLED else ''))
-    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="パカおとパカ美のワクワク競馬"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="brand-banner"><div class="hero-slogan">競馬を<br><span>もっと身近に、<br>もっと楽しく！</span></div><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美のワクワク競馬"><div class="hero-sign">🍀 一緒に<br><b>夢をつかもう！</b></div><div class="brand-sub">🍀 競馬をもっと身近に、もっと楽しく！　単勝＋複勝 1頭勝負 🍀</div></div><div class="nav"><a class="btn secondary" href="/">⌂　ホーム</a><a class="btn secondary" href="/analyze">▥　1頭勝負予想</a><a class="btn secondary" href="/picks">♛　今日の本命</a><a class="btn secondary" href="/history">▣　成績履歴</a><a class="btn secondary" href="/analytics">▥　成績分析</a><a class="btn secondary" href="/validation">⌕　予想検証</a><a class="btn secondary" href="/courses">▦　本日の開催</a><a class="btn green" href="/closing-soon">◷　発走5分前</a></div>{member}{body}<div class="mascot-card"><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美"><div class="mascot-msg">✨ パカおとパカ美と一緒に ✨<br><span>データを味方に楽しく予想！</span><br><b>ワクワクするレースを見つけよう♪</b></div></div><div class="note">このv3は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
+    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="パカおとパカ美のワクワク競馬"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="brand-banner"><div class="hero-slogan">競馬を<br><span>もっと身近に、<br>もっと楽しく！</span></div><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美のワクワク競馬"><div class="hero-sign">🍀 一緒に<br><b>夢をつかもう！</b></div><div class="brand-sub">🍀 競馬をもっと身近に、もっと楽しく！　単勝＋複勝 1頭勝負 🍀</div></div><div class="nav"><a class="btn secondary" href="/">⌂　ホーム</a><a class="btn secondary" href="/analyze">▥　1頭勝負予想</a><a class="btn secondary" href="/picks">♛　今日の本命</a><a class="btn secondary" href="/history">▣　成績履歴</a><a class="btn secondary" href="/analytics">▥　成績分析</a><a class="btn secondary" href="/validation">⌕　予想検証</a><a class="btn secondary" href="/backtest">↶　過去レース検証</a><a class="btn secondary" href="/courses">▦　本日の開催</a><a class="btn green" href="/closing-soon">◷　発走5分前</a></div>{member}{body}<div class="mascot-card"><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美"><div class="mascot-msg">✨ パカおとパカ美と一緒に ✨<br><span>データを味方に楽しく予想！</span><br><b>ワクワクするレースを見つけよう♪</b></div></div><div class="note">このv3は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
 
 
 def login_page(message=""):
@@ -2112,7 +2188,7 @@ def analyze():
         '<div class="small">※v3.3では脚質・展開は確認表示のみで、予想点にはまだ反映していません。</div>'
         '</div>'
     )
-    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績に加え、v3.6のタイム差・上がり3Fテスト補正を使用しています。v3.7.2の馬体重補正は、その馬自身の過去体重中央値・変動幅との比較だけを使い、最大±1.0点のテスト補正として反映しています。v3.8.1の枠番・馬番・出走頭数・レース距離・「競馬場×距離×馬番位置」の比較条件は取得確認用で、スコアにはまだ反映していません。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
+    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績に加え、v3.6のタイム差・上がり3Fテスト補正を使用しています。v3.7.2の馬体重補正は、その馬自身の過去体重中央値・変動幅との比較だけを使い、最大±1.0点のテスト補正として反映しています。v3.8.3では競馬場×距離×馬番位置の枠傾向を、サンプル数に応じ最大±1.0点のテスト補正として反映しています。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
 
 @app.post("/apply")
 def apply():
@@ -2397,25 +2473,148 @@ def closing_soon():
     return page(f'<div class="card"><div class="title">発走5分前レース</div>{cards}</div>')
 
 
+@app.route("/backtest", methods=["GET", "POST"])
+def backtest():
+    default_date=(now().date()-timedelta(days=1)).strftime("%Y-%m-%d")
+    race_date=request.values.get("race_date", default_date).strip()
+    course=request.values.get("course", "").strip()
+    race=to_int(request.values.get("race", ""), 0)
+    opts=''.join(f'<option value="{html.escape(c)}" {"selected" if c==course else ""}>{html.escape(c)}</option>' for c in NAR_COURSE_CODES)
+    ropts=''.join(f'<option value="{n}" {"selected" if n==race else ""}>{n}R</option>' for n in range(1,13))
+    form=(
+        '<div class="card"><div class="title">過去レース検証 v3.9</div>'
+        '<div class="note">対象日のNAR公式「最終オッズ」と、そのレース時点の出馬表を使うバックテストです。結果・払戻は予想計算後に照合します。</div>'
+        '<form method="post"><div class="two">'
+        f'<div><label>日付</label><input type="date" name="race_date" value="{html.escape(race_date)}" max="{today()}"></div>'
+        f'<div><label>競馬場</label><select name="course"><option value="">選択</option>{opts}</select></div>'
+        f'<div><label>レース</label><select name="race"><option value="">選択</option>{ropts}</select></div>'
+        '</div><br><button class="green">この過去レースを検証</button></form></div>'
+    )
+    if request.method=="GET":
+        return page(form)
+    try:
+        dt=datetime.strptime(race_date,"%Y-%m-%d").date()
+        if dt >= now().date():
+            return page(form+'<div class="bad">過去に終了した日付を選んでください。</div>')
+    except Exception:
+        return page(form+'<div class="bad">日付を正しく選んでください。</div>')
+    if course not in NAR_COURSE_CODES or not 1<=race<=12:
+        return page(form+'<div class="bad">競馬場とレースを選んでください。</div>')
+    try:
+        horses=nar_get_horses(course,race,race_date,final_odds=True)
+    except Exception as e:
+        return page(form+f'<div class="bad">過去オッズ取得エラー：{html.escape(type(e).__name__)} - {html.escape(str(e))}</div>')
+    if not horses:
+        return page(form+'<div class="note">このレースの過去単勝・複勝最終オッズを取得できませんでした。</div>')
+
+    race_condition=nar_get_race_condition(course,race,race_date)
+    distance=race_condition.get("distance")
+    gate_stats={}
+    if distance:
+        try:
+            gate_stats=gate_trend_stats_for_backtest(course,int(distance),race_date)
+        except Exception:
+            gate_stats={}
+    try:
+        form_data=nar_get_form_data(course,race,horses,race_date)
+        # 重要: 現在の騎手リーディングを過去へ混ぜると未来情報になるため、
+        # v3.9バックテストでは騎手名だけ表示し、騎手成績補正は中立50点にする。
+    except Exception:
+        form_data={}
+
+    result=evaluate(horses,DAILY_LIMIT,form_data,gate_stats)
+    if not result.get("recs"):
+        return page(form+'<div class="note">候補を計算できませんでした。</div>')
+    b=result["recs"][0]
+    refunds=nar_get_tanfuku_refunds(course,race,race_date)
+    settled=settle_tanfuku(b["horse_no"],refunds)
+    fixed_return=int(settled["return_amount"]) if settled else 0
+    rule_amount=recommended_amount(result["grade"],DAILY_LIMIT,b["place_low"])
+    rule_return=fixed_return if rule_amount else 0
+    rule_profit=rule_return-rule_amount
+    fixed_profit=fixed_return-300 if settled else None
+    race_text, gate_key, _, zone=gate_condition_display(course,race_condition,b,horses)
+    result_lines=list(result.get("reasons") or [])
+    result_lines.append(f"過去検証レース条件：{race_text}")
+    result_lines.append(f"過去検証 枠比較条件：{gate_key}")
+    result_lines.append("過去検証の騎手成績補正：0.0点（現在のリーディング成績を過去へ混入させないため）")
+    if distance:
+        try:
+            result_lines.extend(gate_trend_reason_lines(course,int(distance),zone,gate_stats))
+        except Exception:
+            pass
+    reasons=''.join(f'<li>{html.escape(x)}</li>' for x in result_lines)
+    official=html.escape(settled["official_result"] if settled else "払戻取得なし")
+    result_label=html.escape(settled["result"] if settled else "未取得")
+    fixed_profit_text=f'{fixed_profit:+,}円' if fixed_profit is not None else '算出不可'
+    body=(
+        form+
+        f'<div class="card"><div class="title">{html.escape(race_date)}　{html.escape(course)} {race}R 過去検証結果</div>'
+        f'<div class="grade">{html.escape(result["grade"])}</div><div class="score">参考スコア {result["score"]} / 100</div>'
+        '<div class="horse-card">'
+        f'<div class="horse-no">{b["horse_no"]}番</div><div class="horse-name">{html.escape(b["horse_name"])}</div>'
+        '<div class="pick-grid">'
+        f'<div><span>単勝 最終</span><strong>{b["win_odds"]:.1f}倍</strong></div>'
+        f'<div><span>複勝 最終</span><strong>{b["place_low"]:.1f}～{b["place_high"]:.1f}</strong></div>'
+        f'<div><span>補正後優先度</span><strong>{b["priority_score"]:.1f}</strong></div>'
+        f'<div><span>実際の結果</span><strong>{result_label}</strong></div>'
+        '</div></div>'
+        f'<div class="ok">NAR公式払戻：{official}</div>'
+        '<div class="stats-grid">'
+        f'<div><span>購入ルール</span><strong>{rule_amount:,}円</strong></div>'
+        f'<div><span>ルール払戻</span><strong>{rule_return:,}円</strong></div>'
+        f'<div><span>ルール収支</span><strong>{rule_profit:+,}円</strong></div>'
+        f'<div><span>全ランク仮想300円収支</span><strong>{fixed_profit_text}</strong></div>'
+        '</div><br>'
+        f'<ul>{reasons}</ul>'
+        '<div class="note">重要：過去ページから取得できるのは最終オッズなので、これは「最終オッズ基準バックテスト」です。発走5分前の実運用と完全同一ではありません。また、未来情報混入を避けるため、騎手リーディングは過去検証では中立扱いにしています。枠傾向も対象日より前のレースだけで集計します。</div>'
+        '</div>'
+    )
+    return page(body)
+
+
 @app.get("/validation")
 def validation():
     with db() as con:
-        rows = con.execute(
-            "SELECT * FROM validation_predictions ORDER BY race_date DESC,id DESC LIMIT 300"
-        ).fetchall()
-    settled = [r for r in rows if r["result"] in ("的中", "ハズレ")]
-    n = len(settled)
-    hits = sum(1 for r in settled if r["result"] == "的中")
-    bet = sum(int(r["amount"] or 0) for r in settled)
-    ret = sum(int(r["return_amount"] or 0) for r in settled)
-    roi = ret / bet * 100 if bet else 0
+        rows=con.execute("SELECT * FROM validation_predictions ORDER BY race_date DESC,id DESC LIMIT 300").fetchall()
+    settled=[r for r in rows if r["result"] in ("的中","ハズレ")]
+    n=len(settled); hits=sum(1 for r in settled if r["result"]=="的中")
+    purchased=[r for r in settled if int(r["amount"] or 0)>0]
+    bet=sum(int(r["amount"] or 0) for r in purchased)
+    ret=sum(int(r["return_amount"] or 0) for r in purchased)
+    roi=ret/bet*100 if bet else 0
 
-    cards = ""
-    for r in rows:
-        cards += (
+    rank_cards=""
+    for grade in ("S","A","B","見送り"):
+        g=[r for r in settled if r["grade"]==grade]
+        gn=len(g); gh=sum(1 for r in g if r["result"]=="的中")
+        win_hits=sum(1 for r in g if "単勝" in str(r["official_result"] or ""))
+        place_hits=sum(1 for r in g if "複勝" in str(r["official_result"] or ""))
+        gp=[r for r in g if int(r["amount"] or 0)>0]
+        gbet=sum(int(r["amount"] or 0) for r in gp)
+        gret=sum(int(r["return_amount"] or 0) for r in gp)
+        groi=(gret/gbet*100) if gbet else None
+        groi_text=f"{groi:.1f}%" if groi is not None else "－"
+        rank_cards+=(
             '<div class="horse-card">'
-            f'<div class="horse-name">{r["race_date"]}　{html.escape(r["course"])} {html.escape(r["race"])}'
-            f'　{r["horse_no"]}番 {html.escape(r["horse_name"])}</div>'
+            f'<div class="horse-name">ランク {html.escape(grade)}</div>'
+            '<div class="stats-grid">'
+            f'<div><span>確定数</span><strong>{gn}</strong></div>'
+            f'<div><span>的中率</span><strong>{(gh/gn*100 if gn else 0):.1f}%（{gh}/{gn}）</strong></div>'
+            f'<div><span>単勝的中率</span><strong>{(win_hits/gn*100 if gn else 0):.1f}%（{win_hits}/{gn}）</strong></div>'
+            f'<div><span>複勝的中率</span><strong>{(place_hits/gn*100 if gn else 0):.1f}%（{place_hits}/{gn}）</strong></div>'
+            f'<div><span>購入額</span><strong>{gbet:,}円</strong></div>'
+            f'<div><span>払戻</span><strong>{gret:,}円</strong></div>'
+            f'<div><span>回収率</span><strong>{groi_text}</strong></div>'
+            f'<div><span>収支</span><strong>{gret-gbet:+,}円</strong></div>'
+            '</div></div>'
+        )
+
+    cards=""
+    for r in rows:
+        cards+=(
+            '<div class="horse-card">'
+            f'<div class="horse-name">{r["race_date"]}　{html.escape(r["course"])} {html.escape(r["race"])}　{r["horse_no"]}番 {html.escape(r["horse_name"])}</div>'
             '<div class="pick-grid">'
             f'<div><span>グレード</span><strong>{r["grade"]}</strong></div>'
             f'<div><span>スコア</span><strong>{r["score"]}</strong></div>'
@@ -2425,19 +2624,17 @@ def validation():
             f'<div class="small" style="margin-top:7px">結果：{r["result"]} ／ 払戻：{int(r["return_amount"] or 0):,}円 ／ 検証購入額：{int(r["amount"] or 0):,}円</div>'
             '</div>'
         )
-
-    body = (
-        '<div class="card"><div class="title">予想検証ダッシュボード</div>'
+    body=(
+        '<div class="card"><div class="title">予想検証ダッシュボード v3.9</div>'
         '<form method="post" action="/validation/auto-results"><button class="green">NAR公式から未確定結果を自動取得</button></form>'
         '<div class="validation-grid" style="margin-top:10px">'
-        f'<div>記録数<br><strong>{len(rows)}</strong></div>'
-        f'<div>確定数<br><strong>{n}</strong></div>'
-        f'<div>的中率<br><strong>{hits/n*100 if n else 0:.1f}%</strong></div>'
-        f'<div>回収率<br><strong>{roi:.1f}%</strong></div>'
+        f'<div>記録数<br><strong>{len(rows)}</strong></div><div>確定数<br><strong>{n}</strong></div>'
+        f'<div>的中率<br><strong>{(hits/n*100 if n else 0):.1f}%</strong></div><div>回収率<br><strong>{roi:.1f}%</strong></div>'
         '</div>'
-        f'<div class="ok">検証収支 {ret-bet:+,}円 ／ 購入額 {bet:,}円 ／ 払戻 {ret:,}円</div>'
-        '</div>'
-        + cards
+        f'<div class="ok">検証収支 {ret-bet:+,}円 ／ 購入額 {bet:,}円 ／ 払戻 {ret:,}円</div></div>'
+        '<div class="card"><div class="title">ランク別 詳細検証</div>'
+        '<div class="small">回収率・収支は実際に購入対象となる amount&gt;0 の記録だけで集計します。B・見送りの的中率は観察できます。</div>'
+        f'{rank_cards}</div>'+cards
     )
     return page(body)
 
