@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.10.0 - 前向き検証版
+地方競馬 単勝＋複勝投票管理 v3.10.1 - 一括予想502対策版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -2463,7 +2463,8 @@ def courses():
             f'<div class="race-links">{links}</div>'
             '</div>'
         )
-    allbtn = '<a class="btn gold" href="/all-batch">本日の全開催を一括予想</a>' if active else ''
+    active_q = urllib.parse.quote(",".join(active), safe="")
+    allbtn = f'<a class="btn gold" href="/all-batch?courses={active_q}">本日の全開催を一括予想</a>' if active else ''
     body = (
         f'<div class="card"><div class="title">本日の開催</div><div class="actions">{allbtn}</div></div>'
         + (blocks or '<div class="note">現在取得できる開催情報がありません。</div>')
@@ -2471,36 +2472,40 @@ def courses():
     return page(body)
 
 
+def batch_predict_one(course, race_no, remaining):
+    '''1レースだけを処理する。長時間の一括HTTPリクエストを避けるためにも使用。'''
+    try:
+        horses = nar_get_horses(course, race_no)
+        if not horses:
+            return race_no, "skip", "単勝・複勝未発売・取得不可", None
+        try:
+            form_data = nar_get_form_data(course, race_no, horses)
+            attach_jockey_stats(form_data)
+        except Exception:
+            form_data = {}
+        gate_stats = {}
+        try:
+            rc = nar_get_race_condition(course, race_no)
+            if rc.get("distance"):
+                gate_stats = gate_trend_stats_cached(course, int(rc["distance"]))
+        except Exception:
+            gate_stats = {}
+        return race_no, "ok", "", evaluate(horses, remaining, form_data, gate_stats)
+    except Exception as exc:
+        return race_no, "error", f"{type(exc).__name__}: {exc}", None
+
+
 def batch_predict_course(course, remaining):
     try:
         races = race_numbers(course)
     except Exception:
         races = []
-    def worker(race_no):
-        try:
-            horses = nar_get_horses(course, race_no)
-            if not horses:
-                return race_no, "skip", "単勝・複勝未発売・取得不可", None
-            try:
-                form_data = nar_get_form_data(course, race_no, horses)
-                attach_jockey_stats(form_data)
-            except Exception:
-                form_data = {}
-            gate_stats = {}
-            try:
-                rc = nar_get_race_condition(course, race_no)
-                if rc.get("distance"):
-                    gate_stats = gate_trend_stats_cached(course, int(rc["distance"]))
-            except Exception:
-                gate_stats = {}
-            return race_no, "ok", "", evaluate(horses, remaining, form_data, gate_stats)
-        except Exception as exc:
-            return race_no, "error", f"{type(exc).__name__}: {exc}", None
     out = []
     if not races:
         return out
-    with ThreadPoolExecutor(max_workers=min(4, len(races))) as pool:
-        futures = [pool.submit(worker, r) for r in races]
+    # 競馬場単位の内部処理でも同時数を抑え、Render Freeのメモリ負荷を軽減。
+    with ThreadPoolExecutor(max_workers=min(2, len(races))) as pool:
+        futures = [pool.submit(batch_predict_one, course, r, remaining) for r in races]
         for f in as_completed(futures):
             out.append(f.result())
     out.sort(key=lambda x: x[0])
@@ -2540,33 +2545,114 @@ def render_batch_cards(course, rows, remaining):
     return cards
 
 
+def progressive_batch_page(courses, title):
+    '''レースを1件ずつブラウザから取得し、Gunicornの50秒タイムアウトを回避する。'''
+    courses = [c for c in courses if c in NAR_COURSE_CODES]
+    if not courses:
+        return page('<div class="note">一括予想できる開催がありません。</div>')
+    blocks = ''.join(
+        f'<div class="card" id="course-{i}"><div class="title">{html.escape(c)}</div>'
+        f'<div class="small" id="status-{i}">待機中</div><div class="batch-grid" id="results-{i}"></div></div>'
+        for i, c in enumerate(courses)
+    )
+    courses_json = json.dumps(courses, ensure_ascii=False)
+    script = f'''<script>
+const batchCourses = {courses_json};
+const sleep = ms => new Promise(r => setTimeout(r, ms));
+async function runProgressiveBatch() {{
+  let total = 0, done = 0;
+  const overall = document.getElementById('batch-overall');
+  try {{
+    for (let ci=0; ci<batchCourses.length; ci++) {{
+      const course = batchCourses[ci];
+      const status = document.getElementById('status-'+ci);
+      const results = document.getElementById('results-'+ci);
+      status.textContent = 'レース一覧を取得中…';
+      const rr = await fetch('/batch-races?course=' + encodeURIComponent(course), {{cache:'no-store'}});
+      if (!rr.ok) throw new Error(course + ' レース一覧 HTTP ' + rr.status);
+      const data = await rr.json();
+      const races = data.races || [];
+      total += races.length;
+      if (!races.length) {{ status.textContent='対象レースなし'; continue; }}
+      for (let ri=0; ri<races.length; ri++) {{
+        const race = races[ri];
+        status.textContent = `${{ri+1}} / ${{races.length}} レース処理中（${{race}}R）`;
+        overall.textContent = `処理中：${{course}} ${{race}}R　完了 ${{done}} / ${{total}}`;
+        const u = '/batch-race-fragment?course=' + encodeURIComponent(course) + '&race=' + race;
+        const res = await fetch(u, {{cache:'no-store'}});
+        if (!res.ok) {{
+          results.insertAdjacentHTML('beforeend', `<div class="batch-card"><div class="race-title">${{race}}R</div><div class="bad">取得エラー HTTP ${{res.status}}</div></div>`);
+        }} else {{
+          results.insertAdjacentHTML('beforeend', await res.text());
+        }}
+        done++;
+        await sleep(120);
+      }}
+      status.textContent = `${{races.length}}レース完了`;
+    }}
+    overall.textContent = `一括予想完了：${{done}}レース`;
+    overall.className = 'ok';
+  }} catch (e) {{
+    overall.textContent = '途中で通信エラーが発生しました。ページを再読み込みすると再開できます：' + e.message;
+    overall.className = 'bad';
+  }}
+}}
+window.addEventListener('load', runProgressiveBatch);
+</script>'''
+    body = (
+        f'<div class="card"><div class="title">{html.escape(title)}</div>'
+        '<div class="small">v3.10.1：502対策として、全レースを1件ずつ順番に処理します。予想ロジックと前向き検証条件は変更していません。</div>'
+        '<div id="batch-overall" class="note" style="margin-top:10px">準備中…</div></div>'
+        + blocks + script
+    )
+    return page(body)
+
+
+@app.get("/batch-races")
+def batch_races_api():
+    course = request.args.get("course", "").strip()
+    if course not in NAR_COURSE_CODES:
+        return jsonify({"races": []}), 400
+    try:
+        nums = race_numbers(course)
+    except Exception:
+        nums = []
+    return jsonify({"course": course, "races": nums})
+
+
+@app.get("/batch-race-fragment")
+def batch_race_fragment():
+    course = request.args.get("course", "").strip()
+    race_no = to_int(request.args.get("race", ""), 0)
+    if course not in NAR_COURSE_CODES or not 1 <= race_no <= 12:
+        return '<div class="batch-card"><div class="bad">競馬場またはレース番号が不正です。</div></div>', 400
+    remaining = summary()["remaining"]
+    row = batch_predict_one(course, race_no, remaining)
+    return render_batch_cards(course, [row], remaining)
+
+
 @app.get("/course-batch")
 def course_batch():
     course = request.args.get("course", "").strip()
     if course not in NAR_COURSE_CODES:
         return page('<div class="bad">競馬場を選択してください。</div>')
-    remaining = summary()["remaining"]
-    rows = batch_predict_course(course, remaining)
-    body = (
-        f'<div class="card"><div class="title">{html.escape(course)} 全レース一括予想</div>'
-        '<div class="small">現在の単複予想ロジックは変更していません。</div></div>'
-        f'<div class="batch-grid">{render_batch_cards(course, rows, remaining)}</div>'
-    )
-    return page(body)
+    return progressive_batch_page([course], f'{course} 全レース一括予想')
 
 
 @app.get("/all-batch")
 def all_batch():
-    remaining = summary()["remaining"]
-    body = ""
-    for course in NAR_COURSE_CODES:
-        rows = batch_predict_course(course, remaining)
-        if rows:
-            body += (
-                f'<div class="card"><div class="title">{html.escape(course)}</div>'
-                f'<div class="batch-grid">{render_batch_cards(course, rows, remaining)}</div></div>'
-            )
-    return page(body or '<div class="note">一括予想できる開催がありません。</div>')
+    raw = request.args.get("courses", "").strip()
+    courses = [x for x in raw.split(",") if x in NAR_COURSE_CODES]
+    if not courses:
+        # 直接URLを開いた場合だけ、開催場を軽いRaceList取得で確認する。
+        def active_course(c):
+            try:
+                return c if race_numbers(c) else None
+            except Exception:
+                return None
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            courses = [x for x in pool.map(active_course, NAR_COURSE_CODES) if x]
+    return progressive_batch_page(courses, '本日の全開催 一括予想')
 
 
 @app.get("/closing-soon")
