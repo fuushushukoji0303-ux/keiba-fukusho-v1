@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.9.1 - 過去最終オッズ取得修正版
+地方競馬 単勝＋複勝投票管理 v3.9.2 - 過去レース一括バックテスト版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -21,6 +21,7 @@ import statistics
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import html
+import json
 import os
 import re
 import sqlite3
@@ -30,7 +31,7 @@ from datetime import datetime, timezone, timedelta
 from html.parser import HTMLParser
 from pathlib import Path
 
-from flask import Flask, request, redirect, url_for, session
+from flask import Flask, request, redirect, url_for, session, jsonify
 
 JST = timezone(timedelta(hours=9))
 APP_TITLE = "パカおとパカ美のワクワク競馬 単勝＋複勝"
@@ -828,6 +829,9 @@ def gate_trend_summary_before(course_name, distance, before_date):
 
 def gate_trend_stats_for_backtest(course_name, distance, target_date, lookback_days=14, max_result_pages=30):
     """対象日より前だけを使う枠傾向。未来データ混入を避ける。"""
+    cache_key=(str(course_name), int(distance or 0), str(target_date))
+    if cache_key in _GATE_TREND_RUNTIME_CACHE:
+        return _GATE_TREND_RUNTIME_CACHE[cache_key]
     try:
         target = datetime.strptime(str(target_date), "%Y-%m-%d").date()
     except Exception:
@@ -870,7 +874,9 @@ def gate_trend_stats_for_backtest(course_name, distance, target_date, lookback_d
                         _save_gate_trend_race(d,course_name,r,parsed)
                 except Exception:
                     pass
-    return gate_trend_summary_before(course_name, int(distance), str(target_date))
+    out=gate_trend_summary_before(course_name, int(distance), str(target_date))
+    _GATE_TREND_RUNTIME_CACHE[cache_key]=out
+    return out
 
 def gate_trend_stats_cached(course_name, distance):
     """同一プロセス内では競馬場×距離の収集結果を再利用し、一括予想の負荷を抑える。"""
@@ -1638,8 +1644,8 @@ def history_calibration():
     return {"n":n,"hit_rate":hits/n if n else None,"roi":ret/bet if bet else None}
 
 
-def score_horses(horses, form_data=None, gate_stats=None):
-    cal=history_calibration(); out=[]; form_data=form_data or {}; gate_stats=gate_stats or {}
+def score_horses(horses, form_data=None, gate_stats=None, calibration=None):
+    cal=calibration if calibration is not None else history_calibration(); out=[]; form_data=form_data or {}; gate_stats=gate_stats or {}
     for h in horses:
         low=max(h["place_low"],0.1); high=max(h["place_high"],low); mid=(low+high)/2
         spread=(high-low)/low; rank=h["market_rank"]
@@ -1677,8 +1683,8 @@ def score_horses(horses, form_data=None, gate_stats=None):
     return out
 
 
-def evaluate(horses, remaining, form_data=None, gate_stats=None):
-    ranked=score_horses(horses,form_data,gate_stats)
+def evaluate(horses, remaining, form_data=None, gate_stats=None, calibration=None):
+    ranked=score_horses(horses,form_data,gate_stats,calibration)
     if not ranked: return {"grade":"見送り","score":0,"recs":[],"reasons":["候補を取得できませんでした。"]}
     best=ranked[0]; score=int(round(best["priority_score"]))
     if remaining<300: grade="見送り"
@@ -2561,8 +2567,8 @@ def backtest():
     opts=''.join(f'<option value="{html.escape(c)}" {"selected" if c==course else ""}>{html.escape(c)}</option>' for c in NAR_COURSE_CODES)
     ropts=''.join(f'<option value="{n}" {"selected" if n==race else ""}>{n}R</option>' for n in range(1,13))
     form=(
-        '<div class="card"><div class="title">過去レース検証 v3.9.1</div>'
-        '<div class="note">対象日のNAR公式「最終オッズ」と、そのレース時点の出馬表を使うバックテストです。結果・払戻は予想計算後に照合します。</div>'
+        '<div class="card"><div class="title">過去レース検証 v3.9.2</div>'
+        '<div class="note">対象日のNAR公式「最終オッズ」と、そのレース時点の出馬表を使うバックテストです。結果・払戻は予想計算後に照合します。</div><div class="actions" style="margin:10px 0"><a class="btn gold" href="/backtest/bulk">過去レースを一括検証（20・50・100件）</a></div>'
         '<form method="post"><div class="two">'
         f'<div><label>日付</label><input type="date" name="race_date" value="{html.escape(race_date)}" max="{today()}"></div>'
         f'<div><label>競馬場</label><select name="course"><option value="">選択</option>{opts}</select></div>'
@@ -2601,7 +2607,8 @@ def backtest():
     except Exception:
         form_data={}
 
-    result=evaluate(horses,DAILY_LIMIT,form_data,gate_stats)
+    backtest_cal={"n":0,"hit_rate":None,"roi":None}
+    result=evaluate(horses,DAILY_LIMIT,form_data,gate_stats,backtest_cal)
     if not result.get("recs"):
         return page(form+'<div class="note">候補を計算できませんでした。</div>')
     b=result["recs"][0]
@@ -2646,10 +2653,153 @@ def backtest():
         f'<div><span>全ランク仮想300円収支</span><strong>{fixed_profit_text}</strong></div>'
         '</div><br>'
         f'<ul>{reasons}</ul>'
-        '<div class="note">重要：過去ページから取得できるのは最終オッズなので、これは「最終オッズ基準バックテスト」です。発走5分前の実運用と完全同一ではありません。また、未来情報混入を避けるため、騎手リーディングは過去検証では中立扱いにしています。枠傾向も対象日より前のレースだけで集計します。</div>'
+        '<div class="note">重要：過去ページから取得できるのは最終オッズなので、これは「最終オッズ基準バックテスト」です。発走5分前の実運用と完全同一ではありません。また、未来情報混入を避けるため、騎手リーディングは過去検証では中立扱いにしています。枠傾向も対象日より前のレースだけで集計します。v3.9.2では現在の購入履歴キャリブレーションも過去検証では中立化しています。</div>'
         '</div>'
     )
     return page(body)
+
+
+def run_backtest_summary(race_date, course, race):
+    """1レース分のバックテスト結果をJSON化。ライブ予想や購入記録は変更しない。"""
+    base={"race_date":str(race_date),"course":str(course),"race":int(race)}
+    if course not in NAR_COURSE_CODES or not (1 <= int(race) <= 12):
+        return {**base,"ok":False,"error":"対象外の競馬場またはレース"}
+    try:
+        horses=nar_get_horses_backtest_final(course,int(race),race_date)
+    except Exception as e:
+        return {**base,"ok":False,"error":f"最終オッズ取得エラー {type(e).__name__}"}
+    if not horses:
+        return {**base,"ok":False,"error":"最終オッズ取得なし"}
+    try:
+        rc=nar_get_race_condition(course,int(race),race_date)
+    except Exception:
+        rc={}
+    distance=(rc or {}).get("distance")
+    gate_stats={}
+    if distance:
+        try:
+            gate_stats=gate_trend_stats_for_backtest(course,int(distance),race_date)
+        except Exception:
+            gate_stats={}
+    try:
+        form_data=nar_get_form_data(course,int(race),horses,race_date)
+    except Exception:
+        form_data={}
+    neutral_cal={"n":0,"hit_rate":None,"roi":None}
+    result=evaluate(horses,DAILY_LIMIT,form_data,gate_stats,neutral_cal)
+    if not result.get("recs"):
+        return {**base,"ok":False,"error":"候補計算なし"}
+    b=result["recs"][0]
+    refunds=nar_get_tanfuku_refunds(course,int(race),race_date)
+    settled=settle_tanfuku(b["horse_no"],refunds)
+    if not settled:
+        return {**base,"ok":False,"error":"払戻取得なし"}
+    fixed_return=int(settled["return_amount"])
+    rule_amount=int(recommended_amount(result["grade"],DAILY_LIMIT,b["place_low"]))
+    rule_return=fixed_return if rule_amount else 0
+    official=str(settled.get("official_result") or "")
+    return {
+        **base,"ok":True,"grade":result["grade"],"score":int(result["score"]),
+        "horse_no":int(b["horse_no"]),"horse_name":str(b["horse_name"]),
+        "win_odds":float(b["win_odds"]),"place_low":float(b["place_low"]),"place_high":float(b["place_high"]),
+        "priority":float(b["priority_score"]),"result":str(settled["result"]),
+        "win_hit":("単勝" in official),"place_hit":("複勝" in official),"official_result":official,
+        "virtual_stake":300,"virtual_return":fixed_return,"virtual_profit":fixed_return-300,
+        "rule_stake":rule_amount,"rule_return":rule_return,"rule_profit":rule_return-rule_amount,
+    }
+
+
+def discover_backtest_tasks(start_date, end_date, course_filter, limit_count):
+    start=datetime.strptime(start_date,"%Y-%m-%d").date()
+    end=datetime.strptime(end_date,"%Y-%m-%d").date()
+    dates=[]; d=end
+    while d>=start:
+        dates.append(d.strftime("%Y-%m-%d")); d-=timedelta(days=1)
+    courses=[course_filter] if course_filter in NAR_COURSE_CODES else list(NAR_COURSE_CODES.keys())
+    checks=[(d,c) for d in dates for c in courses]; found=[]
+    if checks:
+        with ThreadPoolExecutor(max_workers=min(10,len(checks))) as pool:
+            fmap={pool.submit(nar_race_numbers_for_date,c,d):(d,c) for d,c in checks}
+            for f in as_completed(fmap):
+                d,c=fmap[f]
+                try: nums=f.result()
+                except Exception: nums=[]
+                for r in nums: found.append({"race_date":d,"course":c,"race":int(r)})
+    order={c:i for i,c in enumerate(NAR_COURSE_CODES.keys())}
+    found.sort(key=lambda x:(x["race_date"],-order.get(x["course"],999),-x["race"]),reverse=True)
+    return found[:int(limit_count)]
+
+
+@app.route("/backtest/bulk", methods=["GET","POST"])
+def backtest_bulk():
+    yesterday=(now().date()-timedelta(days=1))
+    default_end=yesterday.strftime("%Y-%m-%d")
+    default_start=(yesterday-timedelta(days=2)).strftime("%Y-%m-%d")
+    start_date=request.values.get("start_date",default_start).strip()
+    end_date=request.values.get("end_date",default_end).strip()
+    course=request.values.get("course","").strip()
+    limit_count=to_int(request.values.get("limit","50"),50)
+    if limit_count not in (20,50,100): limit_count=50
+    opts='<option value="">全開催場</option>'+''.join(f'<option value="{html.escape(c)}" {"selected" if c==course else ""}>{html.escape(c)}</option>' for c in NAR_COURSE_CODES)
+    limopts=''.join(f'<option value="{n}" {"selected" if n==limit_count else ""}>{n}レース</option>' for n in (20,50,100))
+    form=(
+        '<div class="card"><div class="title">過去レース一括バックテスト v3.9.2</div>'
+        '<div class="note">NAR公式の過去最終オッズと当時の出馬表を使い、20・50・100レースを自動検証します。4レースずつ分割して処理するため、画面を閉じずに完了までお待ちください。</div>'
+        '<form method="post"><div class="two">'
+        f'<div><label>開始日</label><input type="date" name="start_date" value="{html.escape(start_date)}" max="{default_end}"></div>'
+        f'<div><label>終了日</label><input type="date" name="end_date" value="{html.escape(end_date)}" max="{default_end}"></div>'
+        f'<div><label>競馬場</label><select name="course">{opts}</select></div>'
+        f'<div><label>最大検証数</label><select name="limit">{limopts}</select></div>'
+        '</div><br><button class="green">一括検証をスタート</button></form>'
+        '<div class="small" style="margin-top:8px">※過去検証では現在の騎手リーディングと現在の購入履歴キャリブレーションを中立化し、枠傾向は対象日より前だけを使用します。最終オッズ基準のため、発走5分前運用と完全同一ではありません。</div></div>'
+    )
+    if request.method=="GET": return page(form)
+    try:
+        sd=datetime.strptime(start_date,"%Y-%m-%d").date(); ed=datetime.strptime(end_date,"%Y-%m-%d").date()
+    except Exception:
+        return page(form+'<div class="bad">日付を正しく選んでください。</div>')
+    if sd>ed or ed>=now().date(): return page(form+'<div class="bad">終了済みの過去日付を、開始日≦終了日で選んでください。</div>')
+    if (ed-sd).days>30: return page(form+'<div class="bad">一度に指定できる期間は31日以内です。</div>')
+    try: tasks=discover_backtest_tasks(start_date,end_date,course,limit_count)
+    except Exception as e: return page(form+f'<div class="bad">対象レース検索エラー：{html.escape(type(e).__name__)}</div>')
+    if not tasks: return page(form+'<div class="note">指定期間に検証できるレースが見つかりませんでした。</div>')
+    tasks_json=json.dumps(tasks,ensure_ascii=False).replace('</','<\\/')
+    runner="""
+<div class="card"><div class="title">一括検証 進行状況</div><div id="progressText">準備中…</div><div style="height:14px;background:#edf1f5;border-radius:9px;overflow:hidden;margin-top:8px"><div id="progressBar" style="height:100%;width:0%;background:#2f8f5b"></div></div></div>
+<div class="card"><div class="title">集計結果</div><div id="overall" class="stats-grid"></div></div>
+<div class="card"><div class="title">ランク別 詳細</div><div id="rankTable"></div></div>
+<div class="card"><div class="title">検証レース</div><div id="rows"></div></div>
+<script>
+const tasks=__TASKS__; let done=0, results=[], failed=0;
+const esc=s=>String(s??'').replace(/[&<>"']/g,m=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[m]));
+function pct(a,b){return b?((a/b)*100).toFixed(1)+'%':'－'} function yen(n){return Number(n||0).toLocaleString('ja-JP')+'円'}
+function update(){const ok=results.filter(x=>x.ok),n=ok.length,h=ok.filter(x=>x.result==='的中').length,vs=ok.reduce((a,x)=>a+x.virtual_stake,0),vr=ok.reduce((a,x)=>a+x.virtual_return,0),rs=ok.reduce((a,x)=>a+x.rule_stake,0),rr=ok.reduce((a,x)=>a+x.rule_return,0);document.getElementById('progressText').textContent=`${done} / ${tasks.length} レース完了　取得成功 ${n}　取得不可 ${failed}`;document.getElementById('progressBar').style.width=(tasks.length?done/tasks.length*100:0)+'%';document.getElementById('overall').innerHTML=`<div><span>検証成功</span><strong>${n}</strong></div><div><span>的中率</span><strong>${pct(h,n)}</strong></div><div><span>全ランク仮想300円 回収率</span><strong>${pct(vr,vs)}</strong></div><div><span>仮想収支</span><strong>${vr-vs>=0?'+':''}${yen(vr-vs)}</strong></div><div><span>現行S/Aルール 購入額</span><strong>${yen(rs)}</strong></div><div><span>現行S/Aルール 回収率</span><strong>${pct(rr,rs)}</strong></div><div><span>現行S/Aルール 払戻</span><strong>${yen(rr)}</strong></div><div><span>現行S/Aルール 収支</span><strong>${rr-rs>=0?'+':''}${yen(rr-rs)}</strong></div>`;let t='<div style="overflow-x:auto"><table style="width:100%;border-collapse:collapse"><tr><th>ランク</th><th>件数</th><th>的中率</th><th>単勝的中</th><th>複勝的中</th><th>仮想回収率</th><th>仮想収支</th><th>現行ルール回収率</th></tr>';for(const g of ['S','A','B','見送り']){const a=ok.filter(x=>x.grade===g),q=a.length,hh=a.filter(x=>x.result==='的中').length,wh=a.filter(x=>x.win_hit).length,ph=a.filter(x=>x.place_hit).length,vss=a.reduce((z,x)=>z+x.virtual_stake,0),vrr=a.reduce((z,x)=>z+x.virtual_return,0),rss=a.reduce((z,x)=>z+x.rule_stake,0),rrr=a.reduce((z,x)=>z+x.rule_return,0);t+=`<tr><td><b>${g}</b></td><td>${q}</td><td>${pct(hh,q)}</td><td>${pct(wh,q)}</td><td>${pct(ph,q)}</td><td>${pct(vrr,vss)}</td><td>${vrr-vss>=0?'+':''}${yen(vrr-vss)}</td><td>${pct(rrr,rss)}</td></tr>`}t+='</table></div>';document.getElementById('rankTable').innerHTML=t;}
+function addRows(a){const b=document.getElementById('rows');for(const x of a){if(!x.ok){b.insertAdjacentHTML('beforeend',`<div class="note">${esc(x.race_date)} ${esc(x.course)} ${x.race}R：${esc(x.error)}</div>`);continue}b.insertAdjacentHTML('beforeend',`<div class="horse-card"><div class="horse-name">${esc(x.race_date)}　${esc(x.course)} ${x.race}R　<span class="grade">${esc(x.grade)}</span></div><div>${x.horse_no}番 ${esc(x.horse_name)}　スコア ${x.score}　結果 <b>${esc(x.result)}</b></div><div class="small">単勝 ${x.win_odds.toFixed(1)}倍 / 複勝 ${x.place_low.toFixed(1)}～${x.place_high.toFixed(1)} / 仮想300円収支 ${x.virtual_profit>=0?'+':''}${yen(x.virtual_profit)} / 現行ルール ${x.rule_stake?yen(x.rule_stake):'見送り'}</div></div>`)}}
+async function run(){for(let i=0;i<tasks.length;i+=4){const c=tasks.slice(i,i+4);try{const r=await fetch('/backtest/bulk/chunk',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({tasks:c})});const d=await r.json(),a=d.results||[];results.push(...a);failed+=a.filter(x=>!x.ok).length;done+=c.length;addRows(a);update()}catch(e){failed+=c.length;done+=c.length;update()}}document.getElementById('progressText').textContent+='　✓ 完了'} update();run();
+</script>""".replace('__TASKS__',tasks_json)
+    return page(form+runner)
+
+
+@app.post("/backtest/bulk/chunk")
+def backtest_bulk_chunk():
+    payload=request.get_json(silent=True) or {}; tasks=payload.get("tasks") or []
+    if not isinstance(tasks,list) or len(tasks)>4: return jsonify({"results":[],"error":"invalid tasks"}),400
+    clean=[]
+    for t in tasks:
+        try:
+            d=str(t.get("race_date","")); c=str(t.get("course","")); r=int(t.get("race",0)); dt=datetime.strptime(d,"%Y-%m-%d").date()
+            if dt<now().date() and c in NAR_COURSE_CODES and 1<=r<=12: clean.append((d,c,r))
+        except Exception: pass
+    results=[]
+    if clean:
+        with ThreadPoolExecutor(max_workers=min(4,len(clean))) as pool:
+            fmap={pool.submit(run_backtest_summary,d,c,r):(d,c,r) for d,c,r in clean}
+            for f in as_completed(fmap):
+                d,c,r=fmap[f]
+                try: results.append(f.result())
+                except Exception as e: results.append({"race_date":d,"course":c,"race":r,"ok":False,"error":f"処理エラー {type(e).__name__}"})
+    order={(d,c,r):i for i,(d,c,r) in enumerate(clean)}; results.sort(key=lambda x:order.get((x.get("race_date"),x.get("course"),int(x.get("race",0))),999))
+    return jsonify({"results":results})
 
 
 @app.get("/validation")
