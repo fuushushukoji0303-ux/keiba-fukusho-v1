@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.10.2 - 永続ディスク対応版
+地方競馬 単勝＋複勝投票管理 v3.10.3 - Neon永続保存対応版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -25,6 +25,7 @@ import json
 import os
 import re
 import sqlite3
+import time
 import urllib.parse
 import urllib.request
 from datetime import datetime, timezone, timedelta
@@ -58,6 +59,88 @@ if PERSISTENT_DATA_DIR:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = Path(os.environ.get("DB_PATH", str(DATA_DIR / "fukusho_v1.sqlite3")))
 
+# v3.10.3: DATABASE_URL が設定されている場合は Neon/PostgreSQL を使用します。
+# 未設定時は従来のSQLiteへ自動フォールバックするため、ローカル開発も維持します。
+DATABASE_URL = os.environ.get("DATABASE_URL", "").strip()
+DB_BACKEND = "postgres" if DATABASE_URL.startswith(("postgresql://", "postgres://")) else "sqlite"
+_PG_POOL = None
+
+if DB_BACKEND == "postgres":
+    try:
+        import psycopg2
+        from psycopg2.extras import DictCursor
+        from psycopg2.pool import ThreadedConnectionPool
+    except ImportError as exc:
+        raise RuntimeError(
+            "DATABASE_URL is configured, but psycopg2 is not installed. "
+            "Upload the v3.10.3 requirements.txt together with app.py."
+        ) from exc
+
+
+def _pg_sql(sql):
+    # このアプリのSQLは ? プレースホルダを使うためPostgreSQL形式へ変換。
+    # SQL本文中に ? 演算子は使用していないため単純置換で安全です。
+    sql = sql.replace("id INTEGER PRIMARY KEY AUTOINCREMENT", "id BIGSERIAL PRIMARY KEY")
+    return sql.replace("?", "%s")
+
+def _get_pg_pool():
+    global _PG_POOL
+    if _PG_POOL is None:
+        last = None
+        for _ in range(3):
+            try:
+                _PG_POOL = ThreadedConnectionPool(1, 6, DATABASE_URL, connect_timeout=10)
+                break
+            except Exception as exc:
+                last = exc
+                time.sleep(1)
+        if _PG_POOL is None:
+            raise last
+    return _PG_POOL
+
+class _PGConnection:
+    def __init__(self):
+        self.pool = _get_pg_pool()
+        self.raw = self.pool.getconn()
+        self.closed = False
+
+    def execute(self, sql, params=()):
+        cur = self.raw.cursor(cursor_factory=DictCursor)
+        cur.execute(_pg_sql(sql), tuple(params or ()))
+        return cur
+
+    def executemany(self, sql, seq):
+        cur = self.raw.cursor(cursor_factory=DictCursor)
+        cur.executemany(_pg_sql(sql), seq)
+        return cur
+
+    def executescript(self, script):
+        cur = self.raw.cursor(cursor_factory=DictCursor)
+        for stmt in script.split(";"):
+            stmt = stmt.strip()
+            if stmt:
+                cur.execute(_pg_sql(stmt))
+        return cur
+
+    def close(self, commit=True):
+        if self.closed:
+            return
+        try:
+            if commit:
+                self.raw.commit()
+            else:
+                self.raw.rollback()
+        finally:
+            self.pool.putconn(self.raw)
+            self.closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc, tb):
+        self.close(commit=(exc_type is None))
+        return False
+
 app = Flask(__name__)
 app.secret_key = os.environ.get("FLASK_SECRET_KEY", "change-this-secret-before-selling")
 MEMBER_ID = os.environ.get("MEMBER_ID", "").strip()
@@ -69,6 +152,8 @@ def now(): return datetime.now(JST)
 def today(): return now().strftime("%Y-%m-%d")
 
 def db():
+    if DB_BACKEND == "postgres":
+        return _PGConnection()
     con = sqlite3.connect(DB_PATH)
     con.row_factory = sqlite3.Row
     return con
@@ -3330,12 +3415,15 @@ def forward_validation_auto_results():
 
 @app.get("/storage-status")
 def storage_status():
-    """保存先確認用。秘密情報は返さず、永続保存設定の有無だけ表示する。"""
+    """保存先確認用。秘密情報は返さず、保存方式と件数だけ表示する。"""
+    with db() as con:
+        row_count = con.execute("SELECT COUNT(*) FROM forward_validation").fetchone()[0]
     return jsonify({
-        "version": "v3.10.2",
-        "persistent_storage_configured": bool(PERSISTENT_DATA_DIR),
-        "database_filename": DB_PATH.name,
-        "forward_validation_rows": db().execute("SELECT COUNT(*) FROM forward_validation").fetchone()[0],
+        "version": "v3.10.3",
+        "database_backend": "Neon PostgreSQL" if DB_BACKEND == "postgres" else "SQLite",
+        "persistent_storage_configured": DB_BACKEND == "postgres" or bool(PERSISTENT_DATA_DIR),
+        "database_filename": None if DB_BACKEND == "postgres" else DB_PATH.name,
+        "forward_validation_rows": row_count,
     })
 
 
