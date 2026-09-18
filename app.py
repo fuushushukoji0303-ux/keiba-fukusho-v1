@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.10.1 - 一括予想502対策版
+地方競馬 単勝＋複勝投票管理 v3.10.2 - 永続ディスク対応版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -48,6 +48,14 @@ NAR_COURSE_CODES = {
 BASE_DIR = Path(__file__).resolve().parent
 DATA_DIR = Path(os.environ.get("DATA_DIR", str(BASE_DIR / "data")))
 DATA_DIR.mkdir(parents=True, exist_ok=True)
+# v3.10.2: Renderの永続ディスクに対応。
+# Render側で PERSISTENT_DATA_DIR=/var/data を設定し、同じ場所へPersistent Diskを
+# マウントするとSQLiteの全テーブルが再起動・再デプロイ後も保持されます。
+# 未設定時は従来どおり ./data を使用するため、開発環境の動作は変えません。
+PERSISTENT_DATA_DIR = os.environ.get("PERSISTENT_DATA_DIR", "").strip()
+if PERSISTENT_DATA_DIR:
+    DATA_DIR = Path(PERSISTENT_DATA_DIR)
+    DATA_DIR.mkdir(parents=True, exist_ok=True)
 DB_PATH = Path(os.environ.get("DB_PATH", str(DATA_DIR / "fukusho_v1.sqlite3")))
 
 app = Flask(__name__)
@@ -2601,7 +2609,7 @@ window.addEventListener('load', runProgressiveBatch);
 </script>'''
     body = (
         f'<div class="card"><div class="title">{html.escape(title)}</div>'
-        '<div class="small">v3.10.1：502対策として、全レースを1件ずつ順番に処理します。予想ロジックと前向き検証条件は変更していません。</div>'
+        '<div class="small">v3.10.2：502対策の順次処理を維持し、永続ディスク保存に対応しました。予想ロジックと前向き検証4条件は変更していません。</div>'
         '<div id="batch-overall" class="note" style="margin-top:10px">準備中…</div></div>'
         + blocks + script
     )
@@ -3318,6 +3326,17 @@ def forward_validation_auto_results():
             ))
         updated += 1
     return redirect(url_for("forward_validation", updated=updated, pending=pending))
+
+
+@app.get("/storage-status")
+def storage_status():
+    """保存先確認用。秘密情報は返さず、永続保存設定の有無だけ表示する。"""
+    return jsonify({
+        "version": "v3.10.2",
+        "persistent_storage_configured": bool(PERSISTENT_DATA_DIR),
+        "database_filename": DB_PATH.name,
+        "forward_validation_rows": db().execute("SELECT COUNT(*) FROM forward_validation").fetchone()[0],
+    })
 
 
 @app.get("/health")
