@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.10.3 - Neon永続保存対応版
+地方競馬 単勝＋複勝投票管理 v3.10.4 - 発走時刻表示版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -653,7 +653,10 @@ def nar_get_race_condition(course_name, race_no, race_date=None):
         md = re.search(r"[（(]\s*(右|左|直線)\s*[）)]", tail)
         if md:
             direction = md.group(1)
-    return {"surface": surface, "distance": distance, "direction": direction}
+    # v3.10.4: 同じ出馬表から発走時刻も取得。追加通信は行わない。
+    mt = re.search(r"(?<!\d)([01]?\d|2[0-3]):([0-5]\d)\s*発走", plain)
+    start_time = f"{int(mt.group(1)):02d}:{mt.group(2)}" if mt else None
+    return {"surface": surface, "distance": distance, "direction": direction, "start_time": start_time}
 
 
 def gate_condition_display(course_name, race_condition, horse, horses=None):
@@ -2577,13 +2580,18 @@ def batch_predict_one(course, race_no, remaining):
         except Exception:
             form_data = {}
         gate_stats = {}
+        start_time = None
         try:
             rc = nar_get_race_condition(course, race_no)
+            start_time = rc.get("start_time")
             if rc.get("distance"):
                 gate_stats = gate_trend_stats_cached(course, int(rc["distance"]))
         except Exception:
             gate_stats = {}
-        return race_no, "ok", "", evaluate(horses, remaining, form_data, gate_stats)
+        result = evaluate(horses, remaining, form_data, gate_stats)
+        # 表示専用。予想ロジック・点数計算には一切使わない。
+        result["start_time"] = start_time
+        return race_no, "ok", "", result
     except Exception as exc:
         return race_no, "error", f"{type(exc).__name__}: {exc}", None
 
@@ -2622,7 +2630,9 @@ def render_batch_cards(course, rows, remaining):
         amount = recommended_amount(result["grade"], remaining, b["place_low"])
         cards += (
             '<div class="batch-card">'
-            f'<div class="race-title">{race_no}R　{result["grade"]} / {result["score"]}点</div>'
+            f'<div class="race-title">{race_no}R'
+            f'{("　発走 " + html.escape(str(result.get("start_time")))) if result.get("start_time") else ""}'
+            f'　{result["grade"]} / {result["score"]}点</div>'
             f'<div class="horse-name">{b["horse_no"]}番 {html.escape(b["horse_name"])}</div>'
             '<div class="pick-grid">'
             f'<div><span>単勝</span><strong>{b["win_odds"]:.1f}倍</strong></div>'
@@ -2694,7 +2704,7 @@ window.addEventListener('load', runProgressiveBatch);
 </script>'''
     body = (
         f'<div class="card"><div class="title">{html.escape(title)}</div>'
-        '<div class="small">v3.10.2：502対策の順次処理を維持し、永続ディスク保存に対応しました。予想ロジックと前向き検証4条件は変更していません。</div>'
+        '<div class="small">v3.10.4：レース番号の横に発走時刻を表示します。502対策の順次処理・予想ロジック・前向き検証4条件は変更していません。</div>'
         '<div id="batch-overall" class="note" style="margin-top:10px">準備中…</div></div>'
         + blocks + script
     )
