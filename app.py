@@ -1,6 +1,6 @@
 # -*- coding: utf-8 -*-
 """
-地方競馬 単勝＋複勝投票管理 v3.10.4 - 発走時刻表示版
+地方競馬 単勝＋複勝投票管理 v3.11.0 - 複勝重視モード検証版
 
 - NAR公式サイトの当日単勝・複勝オッズを取得
 - 1レース1頭の本命1頭を提示
@@ -219,6 +219,22 @@ def init_db():
             candidate_a INTEGER NOT NULL DEFAULT 0,
             candidate_s1 INTEGER NOT NULL DEFAULT 0,
             candidate_s2 INTEGER NOT NULL DEFAULT 0,
+            result TEXT NOT NULL DEFAULT '未確定',
+            return_amount INTEGER NOT NULL DEFAULT 0,
+            official_result TEXT DEFAULT '', checked_at TEXT DEFAULT '', result_source TEXT DEFAULT '',
+            UNIQUE(race_date, course, race)
+        );
+        CREATE TABLE IF NOT EXISTS place_focus_validation(
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            race_date TEXT NOT NULL, recorded_at TEXT NOT NULL,
+            course TEXT NOT NULL, race TEXT NOT NULL,
+            horse_no INTEGER NOT NULL, horse_name TEXT NOT NULL,
+            win_odds REAL NOT NULL DEFAULT 0,
+            place_low REAL NOT NULL DEFAULT 0, place_high REAL NOT NULL DEFAULT 0,
+            spread REAL NOT NULL DEFAULT 0, market_rank INTEGER NOT NULL DEFAULT 99,
+            focus_score REAL NOT NULL DEFAULT 0, focus_grade TEXT NOT NULL DEFAULT '見送り',
+            buy_candidate INTEGER NOT NULL DEFAULT 0,
+            form_rating REAL NOT NULL DEFAULT 50, jockey_rating REAL NOT NULL DEFAULT 50,
             result TEXT NOT NULL DEFAULT '未確定',
             return_amount INTEGER NOT NULL DEFAULT 0,
             official_result TEXT DEFAULT '', checked_at TEXT DEFAULT '', result_source TEXT DEFAULT '',
@@ -490,6 +506,45 @@ def save_forward_validation_prediction(course, race, result):
             str(result.get("grade") or "見送り"), int(result.get("score") or 0),
             int(b.get("confidence") or 0), int(b.get("market_rank") or 99),
             flags["current_sa"], flags["candidate_a"], flags["candidate_s1"], flags["candidate_s2"]
+        ))
+
+
+def settle_place_only(horse_no, refunds):
+    """複勝重視モード用。複勝200円だけを仮想購入して採点する。"""
+    if not refunds or not refunds.get("place"):
+        return None
+    no = int(horse_no)
+    if no in refunds.get("place", {}):
+        pay = int(refunds["place"][no])
+        return {
+            "result": "的中",
+            "return_amount": pay * 2,
+            "official_result": f"複勝 {pay}円×2",
+        }
+    return {"result": "ハズレ", "return_amount": 0, "official_result": "複勝対象外"}
+
+
+def save_place_focus_prediction(course, race, focus_result):
+    """複勝重視は既存S/Aとは別テーブルへ最初の1回だけ固定保存する。"""
+    if not focus_result or not focus_result.get("recs"):
+        return
+    b = focus_result["recs"][0]
+    with db() as con:
+        con.execute("""
+        INSERT INTO place_focus_validation(
+            race_date,recorded_at,course,race,horse_no,horse_name,
+            win_odds,place_low,place_high,spread,market_rank,focus_score,focus_grade,buy_candidate,
+            form_rating,jockey_rating
+        ) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+        ON CONFLICT(race_date,course,race) DO NOTHING
+        """, (
+            today(), now().strftime("%Y-%m-%d %H:%M:%S"), course, f"{race}R",
+            int(b.get("horse_no") or 0), str(b.get("horse_name") or ""),
+            float(b.get("win_odds") or 0), float(b.get("place_low") or 0),
+            float(b.get("place_high") or 0), float(b.get("spread") or 0),
+            int(b.get("market_rank") or 99), float(focus_result.get("score") or 0),
+            str(focus_result.get("grade") or "見送り"), int(bool(focus_result.get("buy_candidate"))),
+            float(b.get("form_rating") or 50), float(b.get("jockey_rating") or 50),
         ))
 
 
@@ -1845,6 +1900,74 @@ def score_horses(horses, form_data=None, gate_stats=None, calibration=None):
     return out
 
 
+def _recent_top3_rating(form):
+    """近走の3着内安定度。データ不足時は50点へ縮小する。"""
+    recent = list((form or {}).get("recent_finishes") or [])[:5]
+    if not recent:
+        return 50.0
+    weights = [1.40, 1.25, 1.10, 1.00, 0.90][:len(recent)]
+    raw = 100.0 * sum(w for f, w in zip(recent, weights) if int(f) <= 3) / sum(weights)
+    shrink = min(1.0, len(recent) / 5.0)
+    return round(50.0 + (raw - 50.0) * shrink, 1)
+
+
+def evaluate_place_focus(horses, form_data=None, gate_stats=None, calibration=None):
+    """v3.11.0 複勝重視モード。
+
+    現行S/Aロジックは変更せず、同じ取得データから「3着以内の安定性」を重く見る
+    別ランキングを作る。最初は検証専用で、実購入ボタンには接続しない。
+    """
+    ranked = score_horses(horses, form_data, gate_stats, calibration)
+    if not ranked:
+        return {"grade":"見送り","score":0,"recs":[],"buy_candidate":False,"reasons":["候補を取得できませんでした。"]}
+    focus_ranked=[]
+    for x in ranked:
+        mid=max(float(x.get("mid") or 0), 1.01)
+        # 複勝オッズそのものを最重要視。1.2倍≈83点、1.5倍≈67点、2.0倍=50点。
+        market_place=max(0.0,min(100.0,100.0/mid))
+        rank=int(x.get("market_rank") or 99)
+        rank_score=max(0.0,100.0-(rank-1)*12.0)
+        stability=max(0.0,100.0-float(x.get("spread") or 0)*100.0)
+        recent_top3=_recent_top3_rating(x.get("form_data"))
+        form_rating=float(x.get("form_rating") or 50.0)
+        jockey=float(x.get("jockey_rating") or 50.0)
+        # 3着内を狙うため、市場45%＋人気15%＋近走3着内15%を中心にする。
+        focus_score=(market_place*0.45 + rank_score*0.15 + recent_top3*0.15 +
+                     form_rating*0.10 + stability*0.10 + jockey*0.05)
+        y=dict(x)
+        y.update({"place_market_score":round(market_place,1),"place_rank_score":round(rank_score,1),
+                  "recent_top3_rating":round(recent_top3,1),"place_focus_score":round(focus_score,1)})
+        focus_ranked.append(y)
+    focus_ranked.sort(key=lambda z:(z["place_focus_score"],-float(z.get("place_high") or 99),z.get("confidence",0)),reverse=True)
+    best=focus_ranked[0]
+    score=round(float(best["place_focus_score"]),1)
+    low=float(best.get("place_low") or 0); high=float(best.get("place_high") or 0)
+    spread=float(best.get("spread") or 0); rank=int(best.get("market_rank") or 99)
+    # 初期条件は「60%を保証する条件」ではなく、前向き検証するための固定スタート条件。
+    # 1.0～1.1倍だけに寄せず回収率も確認するため、複勝下限1.2倍以上を購入候補条件にする。
+    if score>=75 and rank<=2 and 1.2<=low and high<=1.8 and spread<=0.35:
+        grade="S"
+    elif score>=67 and rank<=3 and 1.2<=low and high<=2.2 and spread<=0.50:
+        grade="A"
+    elif score>=60 and rank<=4:
+        grade="B"
+    else:
+        grade="見送り"
+    buy_candidate=grade in ("S","A")
+    reasons=[
+        f"複勝重視スコア：{score:.1f}点",
+        f"複勝市場評価：{best['place_market_score']:.1f}点",
+        f"人気順位評価：{best['place_rank_score']:.1f}点",
+        f"近走3着内安定度：{best['recent_top3_rating']:.1f}点",
+        f"実績評価：{best.get('form_rating',50):.1f}点",
+        f"騎手評価：{best.get('jockey_rating',50):.1f}点",
+        f"複勝オッズ：{low:.1f}～{high:.1f}倍",
+        f"単勝人気順位：{rank}位",
+        "購入候補条件は検証用。複勝的中率60%や利益を保証するものではありません。",
+    ]
+    return {"grade":grade,"score":score,"recs":[best],"buy_candidate":buy_candidate,"reasons":reasons}
+
+
 def evaluate(horses, remaining, form_data=None, gate_stats=None, calibration=None):
     ranked=score_horses(horses,form_data,gate_stats,calibration)
     if not ranked: return {"grade":"見送り","score":0,"recs":[],"reasons":["候補を取得できませんでした。"]}
@@ -2340,7 +2463,7 @@ body{
 
 def page(body,title=APP_TITLE):
     member=(f'<div class="member-status">会員ログイン中：{html.escape(str(session.get("member_id","")))}　<a href="/logout">ログアウト</a></div>' if LOGIN_ENABLED and session.get("member_authenticated") else ('<div class="member-status setup">販売前：会員ログイン未設定</div>' if not LOGIN_ENABLED else ''))
-    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="パカおとパカ美のワクワク競馬"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="brand-banner"><div class="hero-slogan">競馬を<br><span>もっと身近に、<br>もっと楽しく！</span></div><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美のワクワク競馬"><div class="hero-sign">🍀 一緒に<br><b>夢をつかもう！</b></div><div class="brand-sub">🍀 競馬をもっと身近に、もっと楽しく！　単勝＋複勝 1頭勝負 🍀</div></div><div class="nav"><a class="btn secondary" href="/">⌂　ホーム</a><a class="btn secondary" href="/analyze">▥　1頭勝負予想</a><a class="btn secondary" href="/picks">♛　今日の本命</a><a class="btn secondary" href="/history">▣　成績履歴</a><a class="btn secondary" href="/analytics">▥　成績分析</a><a class="btn secondary" href="/validation">⌕　予想検証</a><a class="btn secondary" href="/forward-validation">▶　前向き検証</a><a class="btn secondary" href="/backtest">↶　過去レース検証</a><a class="btn secondary" href="/courses">▦　本日の開催</a><a class="btn green" href="/closing-soon">◷　発走5分前</a></div>{member}{body}<div class="mascot-card"><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美"><div class="mascot-msg">✨ パカおとパカ美と一緒に ✨<br><span>データを味方に楽しく予想！</span><br><b>ワクワクするレースを見つけよう♪</b></div></div><div class="note">このv3は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
+    return f'''<!doctype html><html lang="ja"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover"><meta name="apple-mobile-web-app-capable" content="yes"><meta name="apple-mobile-web-app-title" content="パカおとパカ美のワクワク競馬"><title>{html.escape(title)}</title><style>{CSS}</style></head><body><div class="wrap"><div class="brand-banner"><div class="hero-slogan">競馬を<br><span>もっと身近に、<br>もっと楽しく！</span></div><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美のワクワク競馬"><div class="hero-sign">🍀 一緒に<br><b>夢をつかもう！</b></div><div class="brand-sub">🍀 競馬をもっと身近に、もっと楽しく！　単勝＋複勝 1頭勝負 🍀</div></div><div class="nav"><a class="btn secondary" href="/">⌂　ホーム</a><a class="btn secondary" href="/analyze">▥　1頭勝負予想</a><a class="btn secondary" href="/picks">♛　今日の本命</a><a class="btn secondary" href="/history">▣　成績履歴</a><a class="btn secondary" href="/analytics">▥　成績分析</a><a class="btn secondary" href="/validation">⌕　予想検証</a><a class="btn secondary" href="/forward-validation">▶　前向き検証</a><a class="btn gold" href="/place-focus">◎　複勝重視</a><a class="btn secondary" href="/backtest">↶　過去レース検証</a><a class="btn secondary" href="/courses">▦　本日の開催</a><a class="btn green" href="/closing-soon">◷　発走5分前</a></div>{member}{body}<div class="mascot-card"><img src="{PAKA_LOGO_DATA}" alt="パカおとパカ美"><div class="mascot-msg">✨ パカおとパカ美と一緒に ✨<br><span>データを味方に楽しく予想！</span><br><b>ワクワクするレースを見つけよう♪</b></div></div><div class="note">このv3は市場オッズ中心のルールベース参考評価です。的中・利益を保証しません。実際の投票・最終確認は公式投票サイトでご自身で行ってください。</div></div></body></html>'''
 
 
 def login_page(message=""):
@@ -2406,7 +2529,7 @@ def analyze():
         attach_jockey_stats(form_data)
     except Exception:
         form_data={}
-    remaining=summary()["remaining"]; result=evaluate(horses,remaining,form_data,gate_stats); pace_now=predict_race_pace(form_data); save_pick(course,race,result); save_validation_prediction(course,race,result,remaining); recs=result["recs"]
+    remaining=summary()["remaining"]; result=evaluate(horses,remaining,form_data,gate_stats); focus_result=evaluate_place_focus(horses,form_data,gate_stats); pace_now=predict_race_pace(form_data); save_pick(course,race,result); save_validation_prediction(course,race,result,remaining); save_place_focus_prediction(course,race,focus_result); recs=result["recs"]
     if recs:
         race_text, gate_key, _, current_zone = gate_condition_display(course, race_condition, recs[0], horses)
         result["reasons"].append(f"レース条件（枠傾向テスト）：{race_text}")
@@ -2438,7 +2561,24 @@ def analyze():
         '<div class="small">※v3.3では脚質・展開は確認表示のみで、予想点にはまだ反映していません。</div>'
         '</div>'
     )
-    return page(form+pace_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績に加え、v3.6のタイム差・上がり3Fテスト補正を使用しています。v3.7.2の馬体重補正は、その馬自身の過去体重中央値・変動幅との比較だけを使い、最大±1.0点のテスト補正として反映しています。v3.8.3では競馬場×距離×馬番位置の枠傾向を、サンプル数に応じ最大±1.0点のテスト補正として反映しています。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
+    focus_html = ""
+    if focus_result.get("recs"):
+        fb=focus_result["recs"][0]
+        focus_reasons=''.join(f'<li>{html.escape(x)}</li>' for x in focus_result.get("reasons",[]))
+        focus_html=(
+            '<div class="card"><div class="title">◎ 複勝重視モード（検証専用）</div>'
+            f'<div class="grade">{html.escape(str(focus_result["grade"]))}</div>'
+            f'<div class="score">複勝重視スコア {float(focus_result["score"]):.1f} / 100</div>'
+            f'<div class="horse-name">{fb["horse_no"]}番 {html.escape(fb["horse_name"])}</div>'
+            f'<div class="pick-grid"><div><span>複勝</span><strong>{fb["place_low"]:.1f}～{fb["place_high"]:.1f}</strong></div>'
+            f'<div><span>人気</span><strong>{fb["market_rank"]}位</strong></div>'
+            f'<div><span>近走3着内評価</span><strong>{fb.get("recent_top3_rating",50):.1f}点</strong></div>'
+            f'<div><span>検証判定</span><strong>{"購入候補" if focus_result.get("buy_candidate") else "見送り"}</strong></div></div>'
+            f'<ul>{focus_reasons}</ul>'
+            '<div class="note">現行S/Aとは完全に別の前向き検証です。まだ実購入には使わず、複勝200円で仮想成績を記録します。</div></div>'
+        )
+
+    return page(form+pace_html+focus_html+f'''<div class="card"><div class="title">{html.escape(course)} {race}R 参考判定</div><div class="grade">{result['grade']}</div><div class="score">参考スコア {result['score']} / 100</div><ul>{reasons}</ul><div class="small">※参考EVは実際の的中確率ではありません。市場オッズ・近走・競馬場・距離適性・騎手成績に加え、v3.6のタイム差・上がり3Fテスト補正を使用しています。v3.7.2の馬体重補正は、その馬自身の過去体重中央値・変動幅との比較だけを使い、最大±1.0点のテスト補正として反映しています。v3.8.3では競馬場×距離×馬番位置の枠傾向を、サンプル数に応じ最大±1.0点のテスト補正として反映しています。S/Aのみ購入候補、Bは観察用です。買い方は単勝100円＋複勝200円です。</div></div><div class="card"><div class="title">本命1頭</div>{cards}{button}</div>''')
 
 @app.post("/apply")
 def apply():
@@ -2589,6 +2729,8 @@ def batch_predict_one(course, race_no, remaining):
         except Exception:
             gate_stats = {}
         result = evaluate(horses, remaining, form_data, gate_stats)
+        focus_result = evaluate_place_focus(horses, form_data, gate_stats)
+        result["place_focus"] = focus_result
         # 表示専用。予想ロジック・点数計算には一切使わない。
         result["start_time"] = start_time
         return race_no, "ok", "", result
@@ -2624,6 +2766,8 @@ def render_batch_cards(course, rows, remaining):
             continue
         save_pick(course, race_no, result)
         save_validation_prediction(course, race_no, result, remaining)
+        focus_result = result.get("place_focus") or {}
+        save_place_focus_prediction(course, race_no, focus_result)
         b = result["recs"][0] if result["recs"] else None
         if not b:
             continue
@@ -2642,8 +2786,9 @@ def render_batch_cards(course, rows, remaining):
             f'<div><span>実績評価</span><strong>{b.get("form_rating",50):.1f}点</strong></div>'
             f'<div><span>騎手評価</span><strong>{b.get("jockey_rating",50):.1f}点</strong></div>'
             '</div>'
-            f'<div class="actions" style="margin-top:8px"><a class="btn secondary" href="/analyze?course={urllib.parse.quote(course)}&race={race_no}&auto=1">詳しく見る</a></div>'
-            '</div>'
+            + (f'<div class="note" style="margin-top:8px"><b>◎ 複勝重視：</b>{focus_result["recs"][0]["horse_no"]}番 {html.escape(focus_result["recs"][0]["horse_name"])}　{html.escape(focus_result["grade"])} / {float(focus_result["score"]):.1f}点　{"購入候補" if focus_result.get("buy_candidate") else "見送り"}</div>' if focus_result.get("recs") else '')
+            + f'<div class="actions" style="margin-top:8px"><a class="btn secondary" href="/analyze?course={urllib.parse.quote(course)}&race={race_no}&auto=1">詳しく見る</a></div>'
+            + '</div>'
         )
     return cards
 
@@ -2704,7 +2849,7 @@ window.addEventListener('load', runProgressiveBatch);
 </script>'''
     body = (
         f'<div class="card"><div class="title">{html.escape(title)}</div>'
-        '<div class="small">v3.10.4：レース番号の横に発走時刻を表示します。502対策の順次処理・予想ロジック・前向き検証4条件は変更していません。</div>'
+        '<div class="small">v3.11.0：現行予想を変更せず、複勝重視モードを別枠で同時記録します。502対策の順次処理・前向き検証4条件は変更していません。</div>'
         '<div id="batch-overall" class="note" style="margin-top:10px">準備中…</div></div>'
         + blocks + script
     )
@@ -2798,8 +2943,10 @@ def closing_soon():
         except Exception:
             gate_stats = {}
         result = evaluate(horses, remaining, form_data, gate_stats)
+        focus_result = evaluate_place_focus(horses, form_data, gate_stats)
         save_pick(x["course"], x["race"], result)
         save_validation_prediction(x["course"], x["race"], result, remaining)
+        save_place_focus_prediction(x["course"], x["race"], focus_result)
         b = result["recs"][0] if result["recs"] else None
         if not b:
             continue
@@ -2810,7 +2957,8 @@ def closing_soon():
             f'　発走 {x["start_dt"].strftime("%H:%M")}　残り約{sec//60}分{sec%60:02d}秒</div>'
             f'<div class="grade">{result["grade"]}</div>'
             f'<div>{b["horse_no"]}番 {html.escape(b["horse_name"])}</div>'
-            f'<div class="actions" style="margin-top:8px"><a class="btn green" href="/analyze?course={urllib.parse.quote(x["course"])}&race={x["race"]}&auto=1">詳しく見る</a></div>'
+            + (f'<div class="small">◎ 複勝重視：{focus_result["recs"][0]["horse_no"]}番 {html.escape(focus_result["recs"][0]["horse_name"])}　{html.escape(focus_result["grade"])} / {float(focus_result["score"]):.1f}点</div>' if focus_result.get("recs") else '')
+            + f'<div class="actions" style="margin-top:8px"><a class="btn green" href="/analyze?course={urllib.parse.quote(x["course"])}&race={x["race"]}&auto=1">詳しく見る</a></div>'
             '</div>'
         )
     return page(f'<div class="card"><div class="title">発走5分前レース</div>{cards}</div>')
@@ -3324,6 +3472,69 @@ def validation_auto_results():
 
 
 
+@app.get("/place-focus")
+def place_focus_dashboard():
+    with db() as con:
+        rows=con.execute("SELECT * FROM place_focus_validation ORDER BY race_date DESC,id DESC LIMIT 1000").fetchall()
+    settled=[r for r in rows if r["result"] in ("的中","ハズレ")]
+    buy_all=[r for r in rows if int(r["buy_candidate"] or 0)==1]
+    buy_settled=[r for r in settled if int(r["buy_candidate"] or 0)==1]
+    def metrics(a):
+        n=len(a); hits=sum(1 for r in a if r["result"]=="的中")
+        stake=n*200; ret=sum(int(r["return_amount"] or 0) for r in a)
+        return n,hits,stake,ret,(ret/stake*100 if stake else None),ret-stake
+    n_all,h_all,st_all,ret_all,roi_all,p_all=metrics(settled)
+    n_buy,h_buy,st_buy,ret_buy,roi_buy,p_buy=metrics(buy_settled)
+    def pct(h,n): return f"{h/n*100:.1f}%" if n else "－"
+    def roitxt(v): return f"{v:.1f}%" if v is not None else "－"
+    recent=""
+    for r in rows[:80]:
+        recent+=(
+            '<div class="horse-card">'
+            f'<div class="horse-name">{r["race_date"]}　{html.escape(r["course"])} {html.escape(r["race"])}　{r["horse_no"]}番 {html.escape(r["horse_name"])}</div>'
+            f'<div class="small">{"購入候補" if int(r["buy_candidate"] or 0) else "見送り"} ／ {html.escape(r["focus_grade"])} ／ 複勝重視スコア {float(r["focus_score"]):.1f}</div>'
+            '<div class="pick-grid">'
+            f'<div><span>人気</span><strong>{r["market_rank"]}位</strong></div>'
+            f'<div><span>複勝</span><strong>{float(r["place_low"]):.1f}～{float(r["place_high"]):.1f}</strong></div>'
+            f'<div><span>実績評価</span><strong>{float(r["form_rating"]):.1f}</strong></div>'
+            f'<div><span>騎手評価</span><strong>{float(r["jockey_rating"]):.1f}</strong></div>'
+            f'<div><span>結果</span><strong>{html.escape(r["result"])}</strong></div>'
+            f'<div><span>複勝200円払戻</span><strong>{int(r["return_amount"] or 0):,}円</strong></div>'
+            '</div></div>'
+        )
+    body=(
+        '<div class="card"><div class="title">◎ 複勝重視モード v3.11.0</div>'
+        '<div class="note"><b>現行S/Aは一切変更していません。</b><br>複勝重視は「3着以内の安定性」を優先する別エンジンです。まず前向き検証だけを行い、複勝的中率60%前後と回収率の両方を確認します。まだ実購入ボタンには接続していません。</div>'
+        '<form method="post" action="/place-focus/auto-results"><button class="green">NAR公式から未確定結果を自動取得</button></form>'
+        f'<div class="validation-grid" style="margin-top:10px"><div>全記録<br><strong>{len(rows)}</strong></div><div>結果確定<br><strong>{len(settled)}</strong></div><div>購入候補登録<br><strong>{len(buy_all)}</strong></div><div>固定開始<br><strong>v3.11.0</strong></div></div></div>'
+        '<div class="card"><div class="title">複勝200円 前向き成績</div>'
+        '<div class="horse-card"><div class="horse-name">全レースで選んだ1頭</div><div class="stats-grid">'
+        f'<div><span>確定</span><strong>{n_all}</strong></div><div><span>複勝的中率</span><strong>{pct(h_all,n_all)}</strong></div><div><span>回収率</span><strong>{roitxt(roi_all)}</strong></div><div><span>収支</span><strong>{p_all:+,}円</strong></div></div></div>'
+        '<div class="horse-card"><div class="horse-name">S/A 購入候補だけ</div><div class="stats-grid">'
+        f'<div><span>確定</span><strong>{n_buy}</strong></div><div><span>複勝的中率</span><strong>{pct(h_buy,n_buy)}</strong></div><div><span>回収率</span><strong>{roitxt(roi_buy)}</strong></div><div><span>収支</span><strong>{p_buy:+,}円</strong></div><div><span>仮想購入額</span><strong>{st_buy:,}円</strong></div><div><span>仮想払戻</span><strong>{ret_buy:,}円</strong></div></div></div>'
+        '<div class="small">※購入候補の初期条件は検証開始時に固定します。60%を保証する条件ではありません。途中で条件を変えず、まず新しいレースで確認します。</div></div>'
+        '<div class="card"><div class="title">複勝重視 前向き検証レース</div>'+(recent or '<div class="note">まだ記録がありません。1頭勝負予想・開催一括予想・発走5分前を使うと自動記録されます。</div>')+'</div>'
+    )
+    return page(body)
+
+
+@app.post("/place-focus/auto-results")
+def place_focus_auto_results():
+    with db() as con:
+        rows=con.execute("SELECT * FROM place_focus_validation WHERE result='未確定'").fetchall()
+    updated=pending=0
+    for r in rows:
+        race_no=to_int(re.sub(r"\D","",r["race"]),0)
+        settled=settle_place_only(r["horse_no"],nar_get_tanfuku_refunds(r["course"],race_no,r["race_date"]))
+        if not settled:
+            pending+=1; continue
+        with db() as con:
+            con.execute("""UPDATE place_focus_validation SET result=?,return_amount=?,official_result=?,checked_at=?,result_source='NAR公式' WHERE id=?""",
+                        (settled["result"],settled["return_amount"],settled["official_result"],now().strftime("%Y-%m-%d %H:%M:%S"),r["id"]))
+        updated+=1
+    return redirect(url_for("place_focus_dashboard",updated=updated,pending=pending))
+
+
 @app.get("/forward-validation")
 def forward_validation():
     with db() as con:
@@ -3429,7 +3640,7 @@ def storage_status():
     with db() as con:
         row_count = con.execute("SELECT COUNT(*) FROM forward_validation").fetchone()[0]
     return jsonify({
-        "version": "v3.10.3",
+        "version": "v3.11.0",
         "database_backend": "Neon PostgreSQL" if DB_BACKEND == "postgres" else "SQLite",
         "persistent_storage_configured": DB_BACKEND == "postgres" or bool(PERSISTENT_DATA_DIR),
         "database_filename": None if DB_BACKEND == "postgres" else DB_PATH.name,
